@@ -1,6 +1,6 @@
-# LangGraph Workflow Integration - Technical Specification
+# LangGraph Runner for RFE Workflow - Technical Specification
 
-**Project:** Ambient Agentic Runner (vTeam) - Multi-Workflow Support
+**Project:** Ambient Agentic Runner (vTeam) - Runner Selection for RFE Workflow
 **Status:** Technical Design - Ready for Review
 **Author:** Stella (Staff Engineer)
 **Date:** 2025-11-04
@@ -9,9 +9,9 @@
 
 ## Overview
 
-This specification package provides comprehensive technical guidance for adding LangGraph-based workflow support to the vTeam platform. The design enables multiple execution engines (Claude Code, LangGraph, future runners) while maintaining backward compatibility with existing RFE workflows.
+This specification package provides comprehensive technical guidance for adding a LangGraph runner option to the existing RFE workflow in the vTeam platform. The design enables users to choose between two execution engines (Claude Code or LangGraph) for the same RFE workflow, while maintaining 100% backward compatibility.
 
-**Key Insight:** The existing runner-shell abstraction is well-architected for multi-runner support. We can add LangGraph with minimal changes to core infrastructure.
+**Key Insight:** The existing runner-shell abstraction is well-architected for multi-runner support. We can add LangGraph runner with minimal changes to core infrastructure—just a single field in the RFEWorkflow CRD and operator image selection logic.
 
 ---
 
@@ -25,9 +25,9 @@ This specification consists of four complementary documents:
 **Purpose:** High-level overview, business value, risk assessment, recommendations
 
 **Key Sections:**
-- Business value and use cases
-- Architecture approach and key decisions
-- Implementation phases (6-8 weeks)
+- Business value of runner choice
+- Runner selection approach
+- Implementation phases (2-3 weeks)
 - Technical risks and mitigation
 - Resource requirements
 - Success metrics
@@ -40,13 +40,13 @@ This specification consists of four complementary documents:
 ### 2. [TECHNICAL-ARCHITECTURE.md](./TECHNICAL-ARCHITECTURE.md)
 **Audience:** Staff engineers, architects, platform engineers
 
-**Purpose:** Detailed technical design, component interactions, API specifications
+**Purpose:** Detailed technical design, component interactions, CRD specifications
 
 **Key Sections:**
 - Integration pattern (Runner-Shell abstraction)
-- Workflow extensibility (CRD design)
+- Runner field in RFEWorkflow CRD
 - Runner lifecycle (CLI vs Graph execution)
-- API & CRD design
+- Operator image selection logic
 - Technical risks and mitigation strategies
 - Implementation phases with acceptance criteria
 - File structure and code organization
@@ -62,33 +62,32 @@ This specification consists of four complementary documents:
 **Purpose:** Concrete code patterns, best practices, production-ready implementations
 
 **Key Patterns:**
-1. **Graph Loading & Validation** - Secure Python AST parsing, import whitelisting
+1. **Template Loading** - SpecKit template parsing and integration
 2. **Checkpoint Management** - SQLite with automatic pruning
-3. **Human-in-the-Loop** - Timeout handling, fallback behavior
-4. **Streaming Output** - Chunking large outputs for WebSocket
-5. **Observability & Metrics** - Execution tracking, debugging support
-6. **Error Recovery** - Retry logic, backoff strategies
-7. **Configuration Management** - YAML-based graph configuration
+3. **Streaming Output** - Chunking large outputs for WebSocket
+4. **Observability & Metrics** - Execution tracking, debugging support
+5. **Error Recovery** - Retry logic, backoff strategies
+6. **Configuration Management** - Runner configuration options
 
 **Read this if:** You're implementing the LangGraph runner and need battle-tested code patterns.
 
 ---
 
 ### 4. [QUICK-START.md](./QUICK-START.md)
-**Audience:** Developers building LangGraph workflows
+**Audience:** Users creating RFE workflows with LangGraph runner
 
-**Purpose:** Getting started guide, common patterns, troubleshooting
+**Purpose:** Getting started guide, runner selection, troubleshooting
 
 **Key Sections:**
-- Creating your first graph
+- Creating RFE workflow with runner selection
+- When to use each runner
 - Configuration options
-- Common patterns (branching, parallel, retry)
 - Debugging tips
 - Best practices
-- Example workflows
+- Output comparison examples
 - Troubleshooting guide
 
-**Read this if:** You're a developer building workflows on vTeam and need practical examples.
+**Read this if:** You're creating RFE workflows and want to understand runner options.
 
 ---
 
@@ -100,15 +99,15 @@ This specification consists of four complementary documents:
 3. Skim "Implementation Phases" for timeline understanding (5 min)
 
 ### For Implementation Team
-1. Read **EXECUTIVE-SUMMARY.md** for context (15 min)
-2. Deep dive into **TECHNICAL-ARCHITECTURE.md** (60 min)
-3. Study **IMPLEMENTATION-PATTERNS.md** for code guidance (45 min)
-4. Reference **QUICK-START.md** for user perspective (20 min)
+1. Read **EXECUTIVE-SUMMARY.md** for context (10 min)
+2. Deep dive into **TECHNICAL-ARCHITECTURE.md** (45 min)
+3. Study **IMPLEMENTATION-PATTERNS.md** for code guidance (30 min)
+4. Reference **QUICK-START.md** for user perspective (15 min)
 
-### For Developers Building Workflows
-1. Start with **QUICK-START.md** (20 min)
-2. Reference specific patterns in **IMPLEMENTATION-PATTERNS.md** as needed
-3. Consult **TECHNICAL-ARCHITECTURE.md** for advanced topics
+### For Users Creating RFE Workflows
+1. Start with **QUICK-START.md** (15 min)
+2. Review runner selection criteria
+3. Understand output equivalence
 
 ---
 
@@ -136,29 +135,27 @@ vTeam Platform (Current State)
     │   └── Context (Session management)
     └── Claude Code Runner (Python)
         ├── Wrapper (adapter.py)
-        ├── Claude SDK integration
+        ├── SpecKit integration
         └── Git operations
 ```
 
 ### Proposed Architecture
 
 ```
-vTeam Platform (With LangGraph)
+vTeam Platform (With LangGraph Runner)
 ├── Backend (Go)
 │   ├── API Handlers
-│   │   ├── RFE Workflows (existing)
-│   │   ├── LangGraph Workflows (NEW)
-│   │   └── Agentic Sessions (extended)
+│   │   ├── RFE Workflows (MODIFIED: accepts runner field)
+│   │   └── Agentic Sessions (unchanged)
 │   └── Types & CRDs
-│       ├── RFEWorkflow (existing)
-│       ├── LangGraphWorkflow (NEW)
-│       └── AgenticSession (workflowType field added)
+│       ├── RFEWorkflow (MODIFIED: runner enum field)
+│       └── AgenticSession (unchanged)
 ├── Operator (Go)
 │   ├── Watch AgenticSession CRs
 │   ├── Create Kubernetes Jobs
-│   └── Select Runner Image (NEW: based on workflowType)
-│       ├── workflowType: "rfe" → Claude Code Runner
-│       └── workflowType: "langgraph" → LangGraph Runner
+│   └── Select Runner Image (MODIFIED: based on runner field)
+│       ├── runner: "claude-code" → Claude Code Runner (default)
+│       └── runner: "langgraph" → LangGraph Runner
 └── Runners
     ├── Runner-Shell (Python) - UNCHANGED
     │   ├── Protocol (same interface)
@@ -168,9 +165,10 @@ vTeam Platform (With LangGraph)
     │   └── ... (unchanged)
     └── LangGraph Runner (NEW)
         ├── Adapter (implements runner-shell interface)
-        ├── Graph Loader (secure loading)
+        ├── RFE Graph (specify → plan → tasks)
+        ├── SpecKit Template Loader
         ├── Checkpointer (SQLite persistence)
-        └── HITL Manager (human-in-the-loop)
+        └── Streaming (WebSocket output)
 ```
 
 ### Key Files to Modify
@@ -178,37 +176,31 @@ vTeam Platform (With LangGraph)
 ```
 Existing Files (Modified):
   /components/operator/internal/handlers/sessions.go
-    - Add getRunnerImageForWorkflow() function
-    - Select image based on spec.workflowType
+    - Add getRunnerImageForSession() function
+    - Select image based on parent RFEWorkflow's runner field
 
   /components/operator/internal/config/config.go
     - Add LangGraphRunnerImage field
 
-  /components/manifests/crds/agenticsessions-crd.yaml
-    - Add spec.workflowType field (enum: rfe, langgraph)
-    - Add spec.workflowRef field
+  /components/manifests/crds/rfeworkflows-crd.yaml
+    - Add spec.runner field (enum: claude-code, langgraph)
+    - Default value: claude-code
+
+  /components/backend/handlers/rfe.go
+    - Accept runner field in RFEWorkflow creation
+    - Validate runner enum values
 
 New Files (Created):
   /components/runners/langgraph-runner/
     ├── adapter.py                   # LangGraph adapter
-    ├── graph_loader.py              # Secure graph loading
+    ├── rfe_graph.py                 # RFE workflow graph (specify → plan → tasks)
+    ├── template_loader.py           # SpecKit template parser
     ├── checkpointer.py              # Checkpoint management
-    ├── hitl_manager.py              # Human-in-the-loop
     ├── streaming.py                 # Output streaming
     ├── observability.py             # Metrics tracking
     ├── error_handling.py            # Retry logic
-    ├── config_manager.py            # Configuration
     ├── Dockerfile                   # Container image
     └── requirements.txt             # Dependencies
-
-  /components/manifests/crds/langgraphworkflows-crd.yaml
-    # New CRD for LangGraph workflows
-
-  /components/backend/handlers/langgraph.go
-    # API handlers for LangGraph workflows
-
-  /components/backend/types/langgraph.go
-    # Go types for LangGraph
 ```
 
 ---
@@ -218,12 +210,13 @@ New Files (Created):
 This design follows established patterns from the vTeam codebase:
 
 1. **Interface Stability**: Runner-shell protocol remains unchanged - all runners implement the same interface
-2. **Separation of Concerns**: Each workflow type has its own CRD, handlers, and runner implementation
-3. **Backward Compatibility**: Existing RFE workflows continue to work without modification
+2. **Minimal CRD Changes**: Single field addition to existing RFEWorkflow CRD
+3. **Backward Compatibility**: Existing RFE workflows continue to work without modification (default: claude-code)
 4. **PVC-Centric State**: All session state (workspaces, checkpoints) persists on PVC
-5. **Operator Pattern**: Operator watches CRs and creates Jobs, no changes to this pattern
+5. **Operator Pattern**: Operator watches CRs and creates Jobs with dynamic image selection
 6. **WebSocket Transport**: Bidirectional communication via WebSocket (unchanged)
 7. **Container Per Session**: Each session gets its own Job + Pod (unchanged)
+8. **Output Equivalence**: Both runners produce identical spec.md, plan.md, tasks.md files
 
 ---
 
@@ -231,15 +224,15 @@ This design follows established patterns from the vTeam codebase:
 
 ### What Makes This Design Solid
 
-1. **Zero Breaking Changes**: Existing RFE workflows continue to work. Default behavior unchanged.
+1. **Zero Breaking Changes**: Existing RFE workflows continue to work. Default runner is claude-code.
 
 2. **Clean Abstraction**: The runner-shell interface provides natural extension point. No hacks needed.
 
-3. **Type Safety**: CRD-per-workflow pattern gives us compile-time validation and clear schemas.
+3. **Minimal Surface Area**: Single CRD field change. Operator image selection logic is 20 lines of code.
 
 4. **State Management**: Checkpoints and workspaces both use PVC. Consistent storage pattern.
 
-5. **Security First**: Graph loading includes AST validation, import whitelisting, dangerous operation blocking.
+5. **SpecKit Compatibility**: LangGraph runner loads same templates, produces identical outputs.
 
 6. **Operational Excellence**: Automatic checkpoint pruning prevents PVC exhaustion. Metrics for debugging.
 
@@ -249,28 +242,23 @@ This design follows established patterns from the vTeam codebase:
 
 ## Implementation Status
 
-- [ ] Phase 1: Foundation (Weeks 1-2)
+- [ ] Phase 1: Foundation (Week 1)
   - [ ] LangGraph adapter skeleton
   - [ ] Separate container image
-  - [ ] Operator workflow type selection
-  - [ ] Basic graph execution test
+  - [ ] Operator runner image selection
+  - [ ] RFEWorkflow CRD runner field
 
-- [ ] Phase 2: Core Execution (Weeks 3-4)
-  - [ ] Graph loading with security validation
+- [ ] Phase 2: RFE Workflow Implementation (Week 2)
+  - [ ] SpecKit template loading
+  - [ ] RFE graph (specify → plan → tasks)
   - [ ] Checkpoint persistence (SQLite)
   - [ ] Session continuation
   - [ ] Error handling and retries
 
-- [ ] Phase 3: Human-in-the-Loop (Week 5)
-  - [ ] Interrupt handling
-  - [ ] WebSocket bidirectional communication
-  - [ ] Input timeout and fallback
-  - [ ] Multi-turn conversations
-
-- [ ] Phase 4: API & CRDs (Week 6)
-  - [ ] LangGraphWorkflow CRD
-  - [ ] Backend API handlers
-  - [ ] Frontend integration
+- [ ] Phase 3: Testing & Validation (Week 3)
+  - [ ] Output equivalence verification
+  - [ ] Backward compatibility testing
+  - [ ] Performance benchmarking
   - [ ] Documentation and examples
 
 ---
@@ -278,41 +266,42 @@ This design follows established patterns from the vTeam codebase:
 ## Success Criteria
 
 ### Technical Validation
-- ✅ Can create AgenticSession with `workflowType: langgraph`
-- ✅ Operator launches correct runner image based on workflow type
-- ✅ LangGraph executes complex graphs end-to-end
+- ✅ Can create RFEWorkflow with `runner: langgraph`
+- ✅ Operator launches correct runner image based on runner field
+- ✅ LangGraph executes RFE workflow (specify → plan → tasks)
 - ✅ Checkpoints persist and sessions resume from parent
-- ✅ Human-in-the-loop works (pause, wait, resume)
-- ✅ 100% backward compatibility with RFE workflows
+- ✅ SpecKit templates loaded correctly
+- ✅ Output files (spec.md, plan.md, tasks.md) match Claude Code quality
+- ✅ 100% backward compatibility with existing RFE workflows
 - ✅ No regression in existing functionality
 
 ### Performance Targets
-- Graph execution overhead < 10% vs Claude Code
+- RFE workflow execution overhead < 10% vs Claude Code
 - Checkpoint save/load latency < 100ms
 - WebSocket message latency < 50ms
-- Support 10+ concurrent graph executions per node
+- Support 10+ concurrent RFE sessions per node
 
-### Security Checklist
-- ✅ Graph AST validation blocks dangerous operations
-- ✅ Import whitelist enforced
-- ✅ No arbitrary code execution paths
-- ✅ Checkpoint data encrypted at rest (PVC encryption)
+### Output Equivalence
+- ✅ spec.md structure matches Claude Code output
+- ✅ plan.md structure matches Claude Code output
+- ✅ tasks.md structure matches Claude Code output
+- ✅ Content quality equivalent (validated by manual review)
 
 ---
 
 ## Open Questions & Next Steps
 
 ### Questions for Review
-1. **Graph Definition Format**: Python-only or also JSON/YAML?
-2. **Checkpointer Backend**: SQLite sufficient or need Postgres option?
-3. **Security**: Is AST validation adequate or need additional sandboxing?
+1. **Checkpointer Backend**: Is SQLite sufficient or need Postgres option for high scale?
+2. **Checkpoint Pruning**: Keep last 10 checkpoints adequate or adjust based on usage?
+3. **Template Parsing**: Should we parse SpecKit templates directly or subprocess to spec-kit CLI?
 4. **Observability**: What metrics should we expose to Prometheus?
 
 ### Next Actions
 1. **Schedule architecture review** (2 hours, all staff engineers)
-2. **Security review** (2 hours, security team)
-3. **Prototype Phase 1** (2-week sprint, 1 engineer)
-4. **Performance testing** (checkpoint I/O, concurrent sessions)
+2. **SpecKit integration review** (1 hour with SpecKit team)
+3. **Prototype Phase 1** (1-week sprint, 1 engineer)
+4. **Performance testing** (checkpoint I/O, output equivalence validation)
 
 ---
 
@@ -329,14 +318,15 @@ This design follows established patterns from the vTeam codebase:
 
 ## Version History
 
-- **v1.0** (2025-11-04): Initial technical specification
-  - Complete architecture design
-  - Implementation patterns
-  - Quick start guide
-  - Executive summary
+- **v2.0** (2025-11-04): Revised to simplified scope
+  - Single RFE workflow with runner choice
+  - No new CRDs - runner field in existing RFEWorkflow
+  - LangGraph implements RFE workflow graph
+  - Focus on output equivalence
+- **v1.0** (2025-11-04): Initial technical specification (multi-workflow scope)
 
 ---
 
 **Status:** 🟢 Ready for Review
 
-This specification is complete and ready for architecture review. All technical decisions are documented with rationale. Implementation path is clear with concrete milestones.
+This specification reflects the simplified scope: one workflow (RFE), two runner options (Claude Code, LangGraph). All technical decisions are documented with rationale. Implementation path is clear with 2-3 week timeline.

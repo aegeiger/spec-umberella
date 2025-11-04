@@ -1,112 +1,22 @@
-# Quick Start: LangGraph Workflow Development
+# Quick Start: RFE Workflow with Runner Selection
 
-**Audience:** Developers building LangGraph workflows on vTeam
-**Prerequisites:** Familiarity with LangGraph basics, vTeam platform
+**Audience:** Users creating RFE workflows on vTeam
+**Prerequisites:** Familiarity with vTeam platform, RFE workflow basics
 
 ---
 
-## Creating Your First LangGraph Workflow
+## Creating RFE Workflow with Runner Selection
 
-### 1. Define Your Graph
+### Option 1: Claude Code Runner (Default)
 
-Create a `graph.py` file in your repository:
-
-```python
-# graph.py - Simple approval workflow
-
-from langgraph.graph import StateGraph
-from typing import TypedDict, Annotated
-from langchain_core.messages import HumanMessage, AIMessage
-
-# Define state schema
-class WorkflowState(TypedDict):
-    messages: list
-    approved: bool
-
-
-# Define nodes
-async def analyze_request(state: WorkflowState) -> WorkflowState:
-    """Analyze the request and prepare recommendation."""
-    request = state["messages"][-1].content
-
-    # Your analysis logic here
-    analysis = f"Analyzed request: {request}"
-
-    return {
-        **state,
-        "messages": state["messages"] + [AIMessage(content=analysis)]
-    }
-
-
-async def request_approval(state: WorkflowState) -> WorkflowState:
-    """Wait for human approval (interrupt point)."""
-    # This is a human-in-the-loop node
-    # Graph will pause here and wait for user input
-    return state
-
-
-async def execute_action(state: WorkflowState) -> WorkflowState:
-    """Execute the approved action."""
-    if state.get("approved"):
-        result = "Action executed successfully"
-    else:
-        result = "Action cancelled by user"
-
-    return {
-        **state,
-        "messages": state["messages"] + [AIMessage(content=result)]
-    }
-
-
-# Build graph
-graph = StateGraph(WorkflowState)
-
-# Add nodes
-graph.add_node("analyze", analyze_request)
-graph.add_node("approval", request_approval)
-graph.add_node("execute", execute_action)
-
-# Define edges
-graph.set_entry_point("analyze")
-graph.add_edge("analyze", "approval")
-graph.add_edge("approval", "execute")
-graph.set_finish_point("execute")
-
-# Compile with interrupt
-graph = graph.compile(
-    interrupt_before=["approval"]  # Pause before approval node
-)
-```
-
-### 2. Add Configuration (Optional)
-
-Create `.langgraph-config.yaml` to customize behavior:
-
-```yaml
-# .langgraph-config.yaml
-
-checkpointer:
-  type: sqlite
-  max_checkpoints_per_thread: 5
-
-execution:
-  recursion_limit: 50
-  timeout_seconds: 3600
-
-human_in_the_loop:
-  enabled: true
-  input_timeout_seconds: 1800
-```
-
-### 3. Create Workflow via API
+The Claude Code runner is the default, stable option that has been running RFE workflows in production.
 
 ```bash
-curl -X POST https://vteam.example.com/api/projects/my-project/langgraph-workflows \
+curl -X POST https://vteam.example.com/api/projects/my-project/rfe-workflows \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "Approval Workflow",
-    "description": "Request approval before executing actions",
-    "graphDefinition": "graph.py",
+    "title": "Add User Authentication",
+    "description": "Implement OAuth2 authentication with GitHub provider",
     "repos": [
       {
         "input": {
@@ -118,360 +28,503 @@ curl -X POST https://vteam.example.com/api/projects/my-project/langgraph-workflo
   }'
 ```
 
-### 4. Create Session and Execute
+**Note:** No `runner` field specified = defaults to `claude-code`.
+
+### Option 2: LangGraph Runner (New)
+
+The LangGraph runner provides checkpointed execution with observable graph stages.
+
+```bash
+curl -X POST https://vteam.example.com/api/projects/my-project/rfe-workflows \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Add User Authentication",
+    "description": "Implement OAuth2 authentication with GitHub provider",
+    "runner": "langgraph",
+    "repos": [
+      {
+        "input": {
+          "url": "https://github.com/my-org/my-repo",
+          "branch": "main"
+        }
+      }
+    ]
+  }'
+```
+
+**Note:** Explicit `runner: langgraph` selects LangGraph runner.
+
+---
+
+## When to Use Each Runner
+
+### Use Claude Code Runner When:
+
+- **Default choice**: You want the proven, stable option
+- **Interactive execution**: You're comfortable with CLI-based interaction
+- **Production workloads**: You need maximum reliability
+- **No checkpoint needs**: You don't need pause/resume functionality
+
+### Use LangGraph Runner When:
+
+- **Checkpointed execution**: You want ability to resume from any stage (specify, plan, tasks)
+- **Enhanced observability**: You need structured execution events for debugging
+- **Future features**: You want foundation for human-in-the-loop review gates (post-MVP)
+- **Experimentation**: You're validating graph-based execution model
+
+---
+
+## Complete Workflow Example
+
+### Step 1: Create RFE Workflow
+
+```bash
+# Create workflow with LangGraph runner
+curl -X POST https://vteam.example.com/api/projects/my-project/rfe-workflows \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Add User Authentication",
+    "description": "OAuth2 with GitHub provider",
+    "runner": "langgraph",
+    "repos": [
+      {
+        "input": {
+          "url": "https://github.com/my-org/backend-api",
+          "branch": "main"
+        }
+      },
+      {
+        "input": {
+          "url": "https://github.com/my-org/spec-kit",
+          "branch": "main",
+          "tags": ["spec-kit"]
+        }
+      }
+    ]
+  }'
+
+# Response includes workflow ID
+{
+  "id": "rfe-workflow-123",
+  "title": "Add User Authentication",
+  "runner": "langgraph",
+  "status": "pending"
+}
+```
+
+### Step 2: Seed Repositories
+
+```bash
+# This step is the same for both runners
+curl -X POST https://vteam.example.com/api/projects/my-project/rfe-workflows/rfe-workflow-123/seed
+
+# Wait for seeding to complete
+# SpecKit templates will be loaded to .specify/templates/
+```
+
+### Step 3: Create Agentic Session
 
 ```bash
 curl -X POST https://vteam.example.com/api/projects/my-project/agentic-sessions \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Deploy new feature to production",
-    "workflowType": "langgraph",
+    "prompt": "Implement OAuth2 authentication with GitHub provider. Include user profile sync and token refresh.",
     "workflowRef": {
-      "kind": "LangGraphWorkflow",
-      "name": "approval-workflow"
+      "kind": "RFEWorkflow",
+      "name": "rfe-workflow-123"
     },
     "interactive": true
   }'
+
+# Response includes session ID
+{
+  "id": "session-456",
+  "status": "running"
+}
 ```
 
-### 5. Monitor Execution
+### Step 4: Monitor Execution
 
-Watch the session via WebSocket or UI:
+Connect via WebSocket to watch progress:
 
 ```javascript
-// Frontend WebSocket connection
-const ws = new WebSocket('wss://vteam.example.com/api/projects/my-project/sessions/SESSION_ID/ws');
+const ws = new WebSocket('wss://vteam.example.com/api/projects/my-project/sessions/session-456/ws');
 
 ws.onmessage = (event) => {
   const message = JSON.parse(event.data);
 
-  if (message.type === 'WAITING_FOR_INPUT') {
-    // Graph is waiting at approval node
-    const userApproval = confirm("Approve this action?");
+  switch (message.type) {
+    case 'SYSTEM_MESSAGE':
+      console.log(`[System] ${message.payload.message}`);
+      break;
 
-    ws.send(JSON.stringify({
-      type: 'user_message',
-      payload: {
-        content: userApproval ? "approved" : "rejected"
+    case 'AGENT_MESSAGE':
+      if (message.payload.type === 'file_written') {
+        console.log(`[File] ${message.payload.file_path} written`);
       }
-    }));
+      break;
+
+    case 'SESSION_STATUS':
+      console.log(`[Status] ${message.payload.status}`);
+      break;
   }
 };
 ```
 
+**Example output (LangGraph runner):**
+```
+[System] Starting RFE workflow execution...
+[System] Executing node: specify
+[File] spec.md written (12.5 KB)
+[System] Checkpoint saved (specify stage complete)
+[System] Executing node: plan
+[File] plan.md written (18.3 KB)
+[System] Checkpoint saved (plan stage complete)
+[System] Executing node: tasks
+[File] tasks.md written (9.7 KB)
+[System] Checkpoint saved (tasks stage complete)
+[Status] completed
+```
+
+### Step 5: View Outputs
+
+```bash
+# Download spec.md
+curl https://vteam.example.com/api/projects/my-project/sessions/session-456/files/spec.md
+
+# Download plan.md
+curl https://vteam.example.com/api/projects/my-project/sessions/session-456/files/plan.md
+
+# Download tasks.md
+curl https://vteam.example.com/api/projects/my-project/sessions/session-456/files/tasks.md
+```
+
+**Note:** Outputs are identical regardless of runner choice (claude-code or langgraph).
+
 ---
 
-## Common Patterns
+## Session Continuation (LangGraph Only)
 
-### Pattern 1: Conditional Branching
-
-```python
-def should_continue(state: WorkflowState) -> str:
-    """Route to different nodes based on state."""
-    if state.get("error"):
-        return "handle_error"
-    elif state.get("needs_approval"):
-        return "request_approval"
-    else:
-        return "complete"
-
-graph.add_conditional_edges(
-    "analyze",
-    should_continue,
-    {
-        "handle_error": "error_handler",
-        "request_approval": "approval",
-        "complete": END
-    }
-)
-```
-
-### Pattern 2: Parallel Execution
-
-```python
-# Execute multiple agents in parallel
-graph.add_node("agent_1", agent_1_node)
-graph.add_node("agent_2", agent_2_node)
-graph.add_node("agent_3", agent_3_node)
-graph.add_node("aggregate", aggregate_results)
-
-# All agents start from same point
-graph.add_edge("start", "agent_1")
-graph.add_edge("start", "agent_2")
-graph.add_edge("start", "agent_3")
-
-# All agents feed into aggregator
-graph.add_edge("agent_1", "aggregate")
-graph.add_edge("agent_2", "aggregate")
-graph.add_edge("agent_3", "aggregate")
-```
-
-### Pattern 3: Retry with Backoff
-
-```python
-from implementation_patterns import with_retry
-
-@with_retry(max_attempts=3, backoff_base=2.0)
-async def api_call_node(state: WorkflowState) -> WorkflowState:
-    """Node with automatic retry on failure."""
-    response = await external_api.call(state["request"])
-    return {**state, "response": response}
-```
-
-### Pattern 4: Session Continuation
-
-Resume a previous session:
+If a LangGraph runner session fails or is interrupted, you can resume from the last checkpoint:
 
 ```bash
 curl -X POST https://vteam.example.com/api/projects/my-project/agentic-sessions \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Continue with user input",
-    "workflowType": "langgraph",
-    "parent_session_id": "previous-session-id",
+    "prompt": "Continue from where we left off",
+    "workflowRef": {
+      "kind": "RFEWorkflow",
+      "name": "rfe-workflow-123"
+    },
+    "parent_session_id": "session-456",
     "interactive": true
   }'
 ```
 
-The graph will automatically resume from the last checkpoint.
+The LangGraph runner will:
+1. Load checkpoint from parent session
+2. Resume from last completed node (e.g., if plan.md was written, start at tasks node)
+3. Reuse spec.md and plan.md from previous session
+
+---
+
+## Comparing Outputs
+
+### Side-by-Side Comparison
+
+Create two RFE workflows with identical prompts but different runners:
+
+```bash
+# Workflow 1: Claude Code runner
+curl -X POST .../rfe-workflows -d '{
+  "title": "Test OAuth2",
+  "runner": "claude-code",
+  ...
+}'
+
+# Workflow 2: LangGraph runner
+curl -X POST .../rfe-workflows -d '{
+  "title": "Test OAuth2",
+  "runner": "langgraph",
+  ...
+}'
+
+# Run sessions for both
+# Compare outputs: spec.md, plan.md, tasks.md
+```
+
+**Expected results:**
+- Both runners produce spec.md with same sections (Overview, Goals, Requirements, etc.)
+- Both runners produce plan.md with same structure (Architecture, Dependencies, Implementation)
+- Both runners produce tasks.md with actionable task breakdown
+- Content quality is equivalent (validated by manual review)
+
+---
+
+## Configuration Options
+
+### Environment Variables (Operator)
+
+```yaml
+# Operator deployment manifest
+env:
+  - name: AMBIENT_CODE_RUNNER_IMAGE
+    value: quay.io/ambient-code/claude-runner:latest
+  - name: LANGGRAPH_RUNNER_IMAGE
+    value: quay.io/ambient-code/langgraph-runner:latest
+```
+
+### Environment Variables (LangGraph Runner)
+
+```yaml
+# LangGraph runner pod
+env:
+  - name: MAX_CHECKPOINTS_PER_THREAD
+    value: "10"  # Keep last 10 checkpoints
+  - name: PRUNE_INTERVAL_HOURS
+    value: "24"  # Prune daily
+  - name: RETRY_ATTEMPTS
+    value: "3"   # Retry failed nodes 3 times
+  - name: TIMEOUT_SECONDS
+    value: "3600"  # 1 hour timeout
+  - name: TRACK_METRICS
+    value: "true"  # Enable metrics tracking
+```
 
 ---
 
 ## Debugging Tips
 
-### View Checkpoint History
+### View Checkpoint History (LangGraph Only)
 
-```python
-# In your workspace, inspect checkpoints
-import sqlite3
+```bash
+# SSH into runner pod
+kubectl exec -it <langgraph-runner-pod> -- /bin/bash
 
-conn = sqlite3.connect('.langgraph/checkpoints.db')
-cursor = conn.cursor()
+# Inspect checkpoint database
+sqlite3 /workspace/sessions/<session-id>/.langgraph/checkpoints.db
 
-# List all checkpoints for a thread
-cursor.execute("""
-    SELECT checkpoint_id, timestamp, step
-    FROM checkpoints
-    WHERE thread_id = ?
-    ORDER BY timestamp DESC
-""", ("your-thread-id",))
+# List all checkpoints
+SELECT checkpoint_id, timestamp, step FROM checkpoints ORDER BY timestamp DESC;
 
-for row in cursor.fetchall():
-    print(f"Checkpoint {row[0]} at {row[1]}: step {row[2]}")
+# View checkpoint count
+SELECT COUNT(*) FROM checkpoints;
 ```
 
-### Enable Verbose Logging
+### Check Runner Selection
 
-```yaml
-# .langgraph-config.yaml
-observability:
-  track_metrics: true
-  log_node_outputs: true  # See full node outputs
+```bash
+# View which runner image was selected for a session
+kubectl describe job <session-job-name> | grep Image
+
+# Should show either:
+# - quay.io/ambient-code/claude-runner:latest
+# - quay.io/ambient-code/langgraph-runner:latest
 ```
 
-### Test Graph Locally
+### Compare Execution Times
 
-```python
-# test_graph.py - Test without vTeam platform
+```bash
+# Get execution metrics for both runners
+curl https://vteam.example.com/api/projects/my-project/sessions/session-456/metrics
 
-from graph import graph
-
-# Run graph with test input
-result = graph.invoke(
-    {"messages": [HumanMessage(content="test input")]},
-    config={"configurable": {"thread_id": "test"}}
-)
-
-print(result)
+# LangGraph runner includes per-node timing:
+{
+  "total_duration_ms": 45230,
+  "nodes": [
+    {"name": "specify", "duration_ms": 12340},
+    {"name": "plan", "duration_ms": 18920},
+    {"name": "tasks", "duration_ms": 13970}
+  ],
+  "checkpoints_saved": 3
+}
 ```
 
 ---
 
 ## Best Practices
 
-### 1. Keep Nodes Small and Focused
+### 1. Start with Claude Code Runner
 
-```python
-# GOOD: Single responsibility
-async def validate_input(state):
-    # Just validation
-    return state
+For production workloads, start with the default Claude Code runner:
 
-async def process_data(state):
-    # Just processing
-    return state
-
-# BAD: Doing too much
-async def validate_and_process_and_send(state):
-    # Too many responsibilities
-    return state
+```json
+{
+  "title": "Production Feature",
+  "runner": "claude-code"  // or omit for default
+}
 ```
 
-### 2. Use Type Hints
+Switch to LangGraph runner once validated in development.
 
-```python
-# GOOD: Clear state schema
-class WorkflowState(TypedDict):
-    request: str
-    analysis: dict
-    approved: bool
+### 2. Use LangGraph for Long-Running Workflows
 
-# BAD: Untyped state
-state = {}
+If your RFE workflow might be interrupted (network issues, pod restarts):
+
+```json
+{
+  "title": "Complex Feature",
+  "runner": "langgraph"  // Checkpoint resume capability
+}
 ```
 
-### 3. Handle Errors Gracefully
+### 3. Monitor Checkpoint Storage
 
-```python
-async def robust_node(state: WorkflowState) -> WorkflowState:
-    try:
-        result = await risky_operation()
-        return {**state, "result": result}
-    except Exception as e:
-        return {**state, "error": str(e), "retry": True}
+For LangGraph workflows, monitor PVC usage:
+
+```bash
+# Check checkpoint database size
+kubectl exec -it <pod> -- du -h /workspace/sessions/*/. langgraph/checkpoints.db
+
+# Should be < 10 MB per session (with pruning)
 ```
 
-### 4. Document Interrupt Points
+### 4. Validate Output Equivalence
 
-```python
-async def approval_node(state: WorkflowState) -> WorkflowState:
-    """
-    INTERRUPT POINT: Waits for human approval.
+Before adopting LangGraph runner broadly, validate outputs:
 
-    Expected input: "approved" or "rejected"
-    """
-    # Graph pauses here if interrupt_before=["approval"]
-    return state
+```bash
+# Run same prompt with both runners
+# Compare spec.md, plan.md, tasks.md
+diff <(curl .../session-claude/files/spec.md) \
+     <(curl .../session-langgraph/files/spec.md)
+
+# Should show minimal differences (timestamps, minor formatting)
 ```
 
 ---
 
 ## Common Issues
 
-### Issue 1: Graph Definition Not Found
+### Issue 1: Runner Field Not Recognized
 
-**Error:** `Graph definition not found at /workspace/graph.py`
+**Error:** `Invalid runner value: langgraph`
 
-**Solution:** Ensure `graph.py` is in the repository root and committed.
+**Solution:** Ensure RFEWorkflow CRD has been updated with `runner` field:
 
-### Issue 2: Import Error
+```bash
+kubectl get crd rfeworkflows.vteam.ambient-code -o yaml | grep runner
+```
 
-**Error:** `Module 'xyz' not allowed`
+If missing, apply updated CRD manifest.
 
-**Solution:** Only whitelisted modules are allowed. Request new modules via platform team or use existing alternatives.
+### Issue 2: LangGraph Runner Image Not Found
 
-### Issue 3: Checkpoint Database Locked
+**Error:** `Failed to pull image: langgraph-runner:latest`
+
+**Solution:** Verify operator has `LANGGRAPH_RUNNER_IMAGE` environment variable:
+
+```bash
+kubectl get deployment operator -o yaml | grep LANGGRAPH_RUNNER_IMAGE
+```
+
+### Issue 3: SpecKit Templates Missing
+
+**Error:** `SpecKit template not found: spec-template.md`
+
+**Solution:** Ensure repositories are seeded before creating session:
+
+```bash
+# Check seeding status
+curl https://vteam.example.com/api/projects/my-project/rfe-workflows/rfe-workflow-123
+
+# Should show: "seeded": true
+
+# If not seeded, trigger seeding
+curl -X POST .../rfe-workflows/rfe-workflow-123/seed
+```
+
+### Issue 4: Checkpoint Database Locked
 
 **Error:** `database is locked`
 
-**Solution:** Another process is accessing checkpoints. Wait and retry, or check for stale processes.
+**Solution:** Another process is accessing checkpoints. This is rare with SQLite WAL mode. Check for:
+- Stale runner pods
+- Multiple sessions using same thread_id (shouldn't happen)
 
-### Issue 4: Timeout Waiting for Input
+```bash
+# List all pods for this session
+kubectl get pods -l session-id=<session-id>
 
-**Error:** `Input timeout after 3600s`
-
-**Solution:** Adjust timeout in config or ensure user responds within timeout window:
-
-```yaml
-human_in_the_loop:
-  input_timeout_seconds: 7200  # 2 hours
+# Should be only one running pod
 ```
 
 ---
 
-## Example Workflows
+## Example Outputs
 
-### Example 1: Code Review Workflow
+### spec.md (Both Runners)
 
-```python
-# Code review with auto-approval for small changes
+```markdown
+# Feature Specification: OAuth2 Authentication
 
-class ReviewState(TypedDict):
-    files_changed: list
-    diff_size: int
-    approved: bool
+## Overview
+This feature adds OAuth2 authentication with GitHub as the identity provider...
 
-async def analyze_changes(state):
-    # Calculate change size
-    return {**state, "diff_size": calculate_size(state["files_changed"])}
+## Goals
+- Enable users to log in using GitHub accounts
+- Securely store and manage access tokens
+...
 
-async def auto_approve_small_changes(state):
-    if state["diff_size"] < 100:
-        return {**state, "approved": True}
-    return state
-
-async def request_human_review(state):
-    # Interrupt for human review
-    return state
-
-# Build graph with conditional approval
-graph = StateGraph(ReviewState)
-graph.add_node("analyze", analyze_changes)
-graph.add_node("auto_approve", auto_approve_small_changes)
-graph.add_node("human_review", request_human_review)
-
-graph.set_entry_point("analyze")
-graph.add_edge("analyze", "auto_approve")
-
-def needs_human(state):
-    return "human_review" if not state.get("approved") else END
-
-graph.add_conditional_edges("auto_approve", needs_human)
-graph = graph.compile(interrupt_before=["human_review"])
+## Requirements
+### MVP Requirements
+- [MVP-1] GitHub OAuth2 integration
+- [MVP-2] User profile synchronization
+...
 ```
 
-### Example 2: Multi-Agent Research
+### plan.md (Both Runners)
 
-```python
-# Parallel research with synthesis
+```markdown
+# Implementation Plan: OAuth2 Authentication
 
-class ResearchState(TypedDict):
-    query: str
-    findings: list
-    synthesis: str
+## Architecture
+- Frontend: React components for login flow
+- Backend: OAuth2 callback handlers in Go
+...
 
-async def search_academic(state):
-    # Research academic sources
-    return state
+## Dependencies
+- GitHub OAuth App registration
+- OAuth2 client library (golang.org/x/oauth2)
+...
 
-async def search_industry(state):
-    # Research industry sources
-    return state
+## Implementation
+### Phase 1: OAuth2 Flow
+1. Register OAuth app with GitHub
+2. Implement /auth/github/login endpoint
+...
+```
 
-async def search_news(state):
-    # Research news sources
-    return state
+### tasks.md (Both Runners)
 
-async def synthesize(state):
-    # Combine all findings
-    return state
+```markdown
+# Tasks: OAuth2 Authentication
 
-# Parallel search, then synthesize
-graph = StateGraph(ResearchState)
-graph.add_node("academic", search_academic)
-graph.add_node("industry", search_industry)
-graph.add_node("news", search_news)
-graph.add_node("synthesize", synthesize)
+## Backend Tasks
+- [ ] Register GitHub OAuth application
+- [ ] Implement /auth/github/login handler
+- [ ] Implement /auth/github/callback handler
+...
 
-graph.set_entry_point("academic")
-graph.set_entry_point("industry")
-graph.set_entry_point("news")
+## Frontend Tasks
+- [ ] Create Login button component
+- [ ] Handle OAuth redirect flow
+...
 
-graph.add_edge("academic", "synthesize")
-graph.add_edge("industry", "synthesize")
-graph.add_edge("news", "synthesize")
-
-graph = graph.compile()
+## Testing Tasks
+- [ ] Unit tests for OAuth handlers
+- [ ] Integration test for full login flow
+...
 ```
 
 ---
 
 ## Resources
 
-- **LangGraph Documentation**: https://langchain-ai.github.io/langgraph/
 - **vTeam Platform Docs**: https://docs.vteam.example.com
-- **Implementation Patterns**: See `IMPLEMENTATION-PATTERNS.md` in this repo
+- **RFEWorkflow CRD Reference**: See `/components/manifests/crds/rfeworkflows-crd.yaml`
 - **Technical Architecture**: See `TECHNICAL-ARCHITECTURE.md` in this repo
+- **Implementation Patterns**: See `IMPLEMENTATION-PATTERNS.md` in this repo
 
 ---
 

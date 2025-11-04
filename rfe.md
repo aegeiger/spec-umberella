@@ -1,111 +1,124 @@
-# Multi-Workflow Support with LangGraph Integration
+# LangGraph Runner for RFE Workflow
 
 **Feature Overview:**
 
-The Ambient Agentic Runner (vTeam) platform currently supports a single workflow type: the RFE (Request for Enhancement) workflow, which runs on Claude Code with SpecKit templates. This enhancement adds support for multiple workflow execution engines, starting with LangGraph as an alternative runner, enabling teams to leverage graph-based agent orchestration patterns while maintaining backward compatibility with existing workflows. This matters to users because it unlocks new automation patterns (approval workflows, research pipelines, multi-step decision trees) that are more naturally expressed as directed acyclic graphs than as interactive CLI sessions, expanding the platform's capabilities from specification generation to general-purpose agentic automation.
+The Ambient Agentic Runner (vTeam) platform currently supports the RFE (Request for Enhancement) workflow, which runs exclusively on the Claude Code runner with SpecKit templates. This enhancement adds a second runner option—LangGraph—for executing the same RFE workflow. Users will be able to choose between Claude Code runner (current, unchanged) or LangGraph runner (new, graph-based) when creating an RFE workflow. This matters to users because the LangGraph runner provides checkpointed execution (pause/resume at any stage), structured observability (graph node events), and foundation for future enhancements (human-in-the-loop review, validation gates, branching logic) while producing identical outputs (spec.md, plan.md, tasks.md) as the existing Claude Code runner.
 
 **Goals:**
 
-* **Enable Multiple Workflow Types**: Allow users to create workflows using different execution engines (Claude Code, LangGraph, and future runners) on the same platform infrastructure
-* **Maintain Backward Compatibility**: Ensure all existing RFE workflows continue to function without modification; default behavior remains unchanged
-* **Leverage Graph-Based Patterns**: Provide users access to LangGraph's stateful graph execution model for workflows requiring branching logic, parallel execution, human-in-the-loop approval gates, and checkpointed state management
-* **Preserve Platform Consistency**: Implement multi-workflow support using existing architectural patterns (runner-shell abstraction, Kubernetes operators, PVC state management, WebSocket transport) without requiring core infrastructure changes
+* **Add Runner Choice**: Allow users to select execution engine (Claude Code or LangGraph) when creating RFE workflows, with both runners producing identical specification outputs
+* **Maintain 100% Backward Compatibility**: Ensure all existing RFE workflows continue to function without modification; Claude Code runner remains the default when runner is not specified
+* **Enable Graph-Based Execution**: Provide access to LangGraph's stateful graph execution model for RFE workflow, including checkpointed state (resume from any stage), structured event streaming, and observable execution traces
+* **Preserve Minimal Changes**: Add runner selection with minimal modification to existing infrastructure—single CRD field, operator image selection logic, new container image
 
 **Who Benefits:**
-* **Development Teams**: Gain flexibility to choose the right execution engine for each use case (interactive specification creation vs. automated approval workflows)
-* **Platform Engineers**: Can extend vTeam with additional runner types in the future following the same pattern
-* **Operations Teams**: Benefit from consistent observability, state management, and operational patterns across all workflow types
+* **Development Teams**: Gain ability to pause/resume RFE workflow at any stage (review spec before generating plan), better debugging with structured execution events
+* **Platform Engineers**: Validate that runner-shell abstraction supports multiple execution engines as designed; establish pattern for future runner additions
+* **Operations Teams**: Benefit from enhanced observability (graph node timing, checkpoint events) while maintaining consistent operational model (same Jobs, PVCs, WebSocket transport)
 
 **Expected Outcomes:**
-* **Today's State**: Users can only create RFE workflows using Claude Code + SpecKit; all automation must fit the interactive CLI model
-* **Future State**: Users can create both RFE workflows (Claude Code) and LangGraph workflows (graph-based), choosing the appropriate execution model for their use case; platform supports extensible workflow type registration
+* **Today's State**: RFE workflows run only on Claude Code runner; execution is opaque CLI interaction; cannot pause/resume mid-workflow
+* **Future State**: Users choose Claude Code (default, unchanged) or LangGraph (new option) when creating RFE workflow; LangGraph provides checkpoint resume, structured events, and foundation for approval gates; both runners produce identical outputs
 
 **Out of Scope:**
 
+* Additional workflow types beyond RFE (approval workflows, research pipelines, etc.) - single workflow only for this enhancement
 * Migration of existing RFE workflows to LangGraph (existing workflows remain on Claude Code)
+* Human-in-the-loop review gates (e.g., approve spec before generating plan) - foundation established but UI/interaction deferred to post-MVP
+* Branching logic or conditional paths in RFE workflow (linear 3-stage execution: specify → plan → tasks)
+* GUI-based graph builder/editor (LangGraph runner uses hardcoded RFE workflow graph)
 * Real-time collaboration features (multiple users editing same workflow simultaneously)
 * Workflow versioning and rollback capabilities (will be addressed in future enhancements)
-* GUI-based graph builder/editor (users define graphs in Python code)
-* Support for additional runner types beyond Claude Code and LangGraph in MVP (framework established but implementations deferred)
+* Additional runner types beyond Claude Code and LangGraph (e.g., CrewAI, AutoGPT)
 * Cross-workflow orchestration (workflows calling other workflows)
-* Workflow marketplace or sharing capabilities
 
 **Requirements:**
 
 **MVP Requirements** (Feature shifts if these slip):
 
-* **[MVP-1] LangGraph Runner Implementation**: Create a LangGraph adapter that implements the runner-shell interface, supporting graph loading, execution, and streaming output via WebSocket
-* **[MVP-2] Workflow Type Selection**: Extend AgenticSession CRD with `workflowType` field; modify operator to launch appropriate runner image based on workflow type (rfe → Claude Code, langgraph → LangGraph)
-* **[MVP-3] Checkpoint State Management**: Implement SQLite-based checkpoint persistence on PVC with automatic pruning to prevent storage exhaustion
-* **[MVP-4] LangGraphWorkflow CRD**: Define and implement Custom Resource Definition for LangGraph workflows with fields for graph definition, configuration, and execution parameters
-* **[MVP-5] Backend API Handlers**: Create Go-based REST API handlers for LangGraph workflow CRUD operations (create, read, update, delete, list)
-* **[MVP-6] Backward Compatibility**: Ensure 100% compatibility with existing RFE workflows; default to "rfe" workflow type when not specified
-* **[MVP-7] Security Validation**: Implement Python AST validation and import whitelisting to prevent arbitrary code execution in user-defined graphs
+* **[MVP-1] Runner Selection Field**: Add `runner` enum field to RFEWorkflow CRD with values `claude-code` (default) or `langgraph`; backend API accepts and validates runner field
+* **[MVP-2] Operator Image Selection**: Modify operator to read `runner` field from RFEWorkflow and select appropriate container image (Claude Code runner image or LangGraph runner image) when creating AgenticSession Job
+* **[MVP-3] LangGraph Runner Implementation**: Create LangGraph adapter implementing runner-shell interface with RFE workflow graph (specify → plan → tasks nodes), SpecKit template loading, and WebSocket streaming
+* **[MVP-4] SpecKit Integration**: LangGraph runner reads SpecKit templates from `.specify/templates/` directory, uses templates as system prompts for Claude API calls, produces identical outputs (spec.md, plan.md, tasks.md) as Claude Code runner
+* **[MVP-5] Checkpoint State Management**: Implement SQLite-based checkpoint persistence on PVC (`.langgraph/checkpoints.db`) with automatic pruning (keep last 10 checkpoints) to prevent storage exhaustion
+* **[MVP-6] Identical Output Verification**: LangGraph runner produces spec.md, plan.md, tasks.md files with same structure and content quality as Claude Code runner; both runners are functionally equivalent from user perspective
+* **[MVP-7] Backward Compatibility Testing**: Validate that existing RFE workflows (without `runner` field) continue to execute on Claude Code runner with no behavior changes; default value is `claude-code`
 
 **Non-MVP Requirements** (Desirable but can slip):
 
-* **[Post-MVP-1] Human-in-the-Loop Support**: Bidirectional WebSocket communication for graph interrupt nodes requiring user input
-* **[Post-MVP-2] Frontend UI Components**: Web interface for creating and configuring LangGraph workflows
-* **[Post-MVP-3] Advanced Observability**: Prometheus metrics for graph execution performance, node-level timing, checkpoint I/O
-* **[Post-MVP-4] Session Continuation**: Resume workflow execution from parent session's checkpoint state
+* **[Post-MVP-1] Session Continuation**: Resume LangGraph session from parent checkpoint (continue from specify, plan, or tasks stage)
+* **[Post-MVP-2] Human-in-the-Loop Gates**: Add interrupt nodes for user review (e.g., approve spec before generating plan); requires bidirectional WebSocket and frontend UI
+* **[Post-MVP-3] Frontend Runner Selection UI**: Web interface dropdown for selecting runner when creating RFE workflow (currently requires API/kubectl)
+* **[Post-MVP-4] Advanced Observability**: Prometheus metrics for graph execution performance, node-level timing, checkpoint I/O latency
 * **[Post-MVP-5] Postgres Checkpointer**: Alternative checkpoint backend for high-scale deployments (SQLite sufficient for MVP)
+* **[Post-MVP-6] Validation Nodes**: Optional graph nodes for validating spec completeness, plan feasibility before proceeding to next stage
 
 **Done - Acceptance Criteria:**
 
 The feature is complete and successful when:
 
-* **AC-1 Workflow Execution**: A user can create an AgenticSession with `workflowType: langgraph` and the operator launches the LangGraph runner container (not Claude Code runner)
-* **AC-2 Graph Execution**: The LangGraph runner successfully loads a user-defined graph (Python code), executes it end-to-end, and streams output to the backend via WebSocket
-* **AC-3 State Persistence**: Checkpoints are saved to `.langgraph/checkpoints.db` on PVC after each node execution; session resumes from last checkpoint if interrupted
-* **AC-4 API Operations**: Users can create, retrieve, update, and delete LangGraphWorkflow resources via REST API, and these operations correctly manage the underlying Kubernetes Custom Resources
-* **AC-5 Backward Compatibility**: All existing RFE workflows continue to execute without modification; creating an AgenticSession without specifying `workflowType` defaults to "rfe" and launches Claude Code runner
-* **AC-6 Security Validation**: Attempting to load a graph with dangerous operations (e.g., `os.system`, `eval`, `__import__`) results in validation failure with clear error message
-* **AC-7 Operational Parity**: LangGraph workflows appear in session lists, support stop/delete operations, and stream output to frontend with same UX as Claude Code sessions
-* **AC-8 Documentation**: Quick-start guide and example graphs are available for developers building LangGraph workflows
+* **AC-1 Runner Selection**: A user can create an RFEWorkflow with `runner: langgraph` via API, and the field is persisted in the Kubernetes Custom Resource
+* **AC-2 Image Selection**: When an AgenticSession is created for an RFEWorkflow with `runner: langgraph`, the operator launches the LangGraph runner container image (not Claude Code runner)
+* **AC-3 RFE Execution**: The LangGraph runner executes the 3-stage RFE workflow (specify → plan → tasks), loading SpecKit templates, calling Claude API, and producing spec.md, plan.md, tasks.md files in the workspace
+* **AC-4 Output Equivalence**: The spec.md, plan.md, and tasks.md files generated by LangGraph runner are structurally identical and of equivalent quality to those generated by Claude Code runner for the same input prompt
+* **AC-5 Checkpoint Persistence**: Checkpoints are saved to `.langgraph/checkpoints.db` after each graph node execution (specify, plan, tasks); checkpoint files are visible on PVC
+* **AC-6 Backward Compatibility**: Creating an RFEWorkflow without specifying `runner` field (or with `runner: claude-code`) executes on Claude Code runner with no behavior changes; existing workflows unaffected
+* **AC-7 Streaming Output**: LangGraph runner streams execution output to backend via WebSocket; frontend displays real-time progress updates identical to Claude Code runner UX
+* **AC-8 Documentation**: README documents runner selection field, explains when to use each runner (Claude Code for interactive, LangGraph for checkpointed), provides example API request
 
 **Use Cases - i.e. User Experience & Workflow:**
 
-**Use Case 1: Approval Workflow with Branching Logic**
+**Use Case 1: Create RFE Workflow with LangGraph Runner**
 
-**Actor:** Development team lead
+**Actor:** Product manager
 
 **Main Success Scenario:**
-1. User creates a LangGraphWorkflow defining an approval graph: PR Review → Manager Approval → Deploy (with rejection branches returning to author)
-2. User creates AgenticSession with `workflowType: langgraph` and `workflowRef` pointing to the LangGraphWorkflow
-3. Operator detects new session, launches LangGraph runner container
-4. Graph executes: analyzes PR, requests manager input via HITL interrupt node
-5. Manager provides approval/rejection via frontend
-6. Graph resumes from checkpoint, proceeds to deployment or returns to author
-7. Final state saved to checkpoint; session marked complete
+1. User creates RFEWorkflow via API, specifying `runner: langgraph`, title "Add user authentication", and umbrella repo URL
+2. Backend validates request, creates RFEWorkflow Custom Resource with `spec.runner: langgraph`
+3. User clicks "Seed Repositories" - backend clones repos, adds SpecKit templates to `.specify/` directory (same as Claude Code)
+4. User creates AgenticSession with prompt "Implement OAuth2 authentication with GitHub provider"
+5. Operator detects new session, reads parent RFEWorkflow, sees `runner: langgraph`
+6. Operator creates Kubernetes Job with LangGraph runner container image
+7. LangGraph runner initializes, loads RFE graph definition (specify → plan → tasks)
+8. Graph executes:
+   - **Specify node**: Reads `.specify/templates/spec-template.md`, calls Claude API, writes `spec.md`
+   - **Plan node**: Reads spec.md and plan template, calls Claude API, writes `plan.md`
+   - **Tasks node**: Reads plan.md and tasks template, calls Claude API, writes `tasks.md`
+9. Checkpoints saved after each node to `.langgraph/checkpoints.db`
+10. Output streamed to frontend; user sees "Generating specification...", "Generating plan...", "Generating tasks..."
+11. Session completes; user views spec.md, plan.md, tasks.md in workspace (identical quality to Claude Code output)
 
 **Alternative Flow:**
-* **A1**: Manager doesn't respond within timeout → Graph proceeds with default action (rejection)
-* **A2**: Graph execution fails mid-node → Checkpoint preserves state; user can retry from last successful node
-* **A3**: User stops session → Checkpoint saved; new session can resume from parent checkpoint
+* **A1**: Graph execution fails at plan node → Checkpoint preserves spec.md; user can restart from plan stage (post-MVP feature)
+* **A2**: User stops session mid-execution → Checkpoint saved; can resume later
+* **A3**: Network interruption → Graph execution pauses; resumes when connectivity restored
 
-**Use Case 2: Research Pipeline with Parallel Execution**
+**Use Case 2: Existing RFE Workflow (Backward Compatibility)**
 
-**Actor:** Research team
-
-**Main Success Scenario:**
-1. User defines graph: Query → [Search Papers || Search Patents || Search Standards] → Merge Results → Generate Report
-2. Graph executes three search nodes in parallel (LangGraph parallel execution)
-3. Results merge at synchronization node
-4. Report generated and saved to workspace
-5. Output streamed to frontend in real-time via WebSocket
-6. Session completes successfully
-
-**Use Case 3: Existing RFE Workflow (Backward Compatibility)**
-
-**Actor:** Product manager (existing user)
+**Actor:** Product manager (existing user, unaware of new feature)
 
 **Main Success Scenario:**
-1. User creates RFEWorkflow (same as today)
-2. User clicks "Seed Repositories" (same as today)
-3. Backend creates AgenticSession without specifying `workflowType` (defaults to "rfe")
-4. Operator launches Claude Code runner (same as today)
-5. Claude Code executes RFE workflow with SpecKit templates (same as today)
-6. User sees no changes in UX or behavior
+1. User creates RFEWorkflow via API (does NOT specify `runner` field)
+2. Backend creates RFEWorkflow with `spec.runner: claude-code` (default value)
+3. User seeds repos, creates session (same workflow as before)
+4. Operator reads `runner: claude-code`, launches Claude Code runner container (existing behavior)
+5. Claude Code executes RFE workflow with SpecKit (same as always)
+6. User sees no difference in UX, outputs, or behavior
+
+**Use Case 3: Compare Runner Outputs**
+
+**Actor:** Platform engineer (validating LangGraph runner)
+
+**Main Success Scenario:**
+1. Engineer creates two RFEWorkflows with identical prompts: one with `runner: claude-code`, one with `runner: langgraph`
+2. Executes both sessions in parallel
+3. Compares outputs:
+   - spec.md content structure (both have Overview, Goals, Requirements, etc.)
+   - plan.md content structure (both have Architecture, Dependencies, Implementation sections)
+   - tasks.md content structure (both have actionable task lists)
+4. Validates quality equivalence (both runners produce comprehensive, actionable specifications)
+5. Checks checkpoint files: `.langgraph/checkpoints.db` exists for LangGraph session, not for Claude Code session
+6. Confirms LangGraph session can be resumed (post-MVP), Claude Code cannot
 
 **Use Case Diagram:**
 
@@ -114,194 +127,230 @@ The feature is complete and successful when:
 │    User     │
 └──────┬──────┘
        │
-       ├──────────────────────┐
-       │                      │
-       ▼                      ▼
-┌─────────────────┐    ┌─────────────────┐
-│ Create RFE WF   │    │ Create LG WF    │
-│ (Claude Code)   │    │ (LangGraph)     │
-└────────┬────────┘    └────────┬────────┘
-         │                      │
-         ▼                      ▼
-┌──────────────────────────────────────┐
-│     Create AgenticSession            │
-│  - RFE: workflowType="rfe" (default) │
-│  - LG: workflowType="langgraph"      │
-└────────┬─────────────────────────────┘
+       │ Create RFEWorkflow
+       ▼
+┌─────────────────────────────────┐
+│  Specify runner field           │
+│  - runner: claude-code (default)│
+│  - runner: langgraph            │
+└────────┬────────────────────────┘
          │
+         │ Backend creates RFEWorkflow CR
          ▼
-┌──────────────────────────────────────┐
-│          Operator Watch              │
-│   - Detect new session               │
-│   - Select runner image              │
-└────────┬─────────────────────────────┘
+┌─────────────────────────────────┐
+│     RFEWorkflow CR              │
+│  spec:                          │
+│    runner: langgraph            │
+│    repos: [...]                 │
+└────────┬────────────────────────┘
          │
-         ├──────────────┬───────────────┐
-         ▼              ▼               ▼
+         │ User creates AgenticSession
+         ▼
+┌─────────────────────────────────┐
+│    Operator Reconcile           │
+│  1. Get AgenticSession          │
+│  2. Lookup parent RFEWorkflow   │
+│  3. Read runner field           │
+│  4. Select container image      │
+└────────┬────────────────────────┘
+         │
+         ├──────────────┬─────────────┐
+         ▼              ▼             ▼
 ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
 │ Claude Code  │ │  LangGraph   │ │  Future      │
 │   Runner     │ │   Runner     │ │  Runners     │
+│  (existing)  │ │  (new)       │ │  (deferred)  │
 └──────┬───────┘ └──────┬───────┘ └──────────────┘
        │                │
+       │ Both execute RFE workflow
+       │ Both produce spec.md, plan.md, tasks.md
+       │
        └────────┬───────┘
                 ▼
        ┌──────────────────┐
        │ Stream to        │
        │ Frontend         │
+       │ (WebSocket)      │
        └──────────────────┘
 ```
 
 **Documentation Considerations:**
 
-* **Quick Start Guide**: Step-by-step tutorial for creating first LangGraph workflow with example graph (approval workflow)
-* **Graph Definition Reference**: Documentation on supported LangGraph patterns, node types, state schemas, and checkpoint behavior
-* **Migration Guide**: Guidance on when to use Claude Code (RFE workflows) vs. LangGraph (approval/research workflows); not a migration path but a decision framework
-* **API Reference Updates**: Extend existing vTeam API docs with LangGraphWorkflow endpoints, request/response schemas
-* **Security Best Practices**: Guidelines on safe graph definitions, import restrictions, avoiding dangerous operations
-* **Troubleshooting Guide**: Common issues (checkpoint corruption, graph validation failures, timeout handling) with resolution steps
-* **Operator Configuration**: Document new environment variables (LANGGRAPH_RUNNER_IMAGE) and ConfigMap changes
-* **Extension Documentation**: Link to existing runner-shell documentation at `/components/runners/runner-shell/README.md` (no changes needed to runner-shell itself)
+* **Runner Selection Guide**: Document when to use Claude Code vs. LangGraph runner (Claude Code: default, stable, interactive; LangGraph: checkpointed, observable, foundation for future features like approval gates)
+* **API Reference Updates**: Update RFEWorkflow API documentation with `runner` field, enum values, default behavior
+* **Quick Start Example**: Provide curl/API example for creating RFEWorkflow with `runner: langgraph`
+* **Checkpoint Behavior**: Explain checkpoint persistence, pruning policy (keep last 10), storage location (`.langgraph/checkpoints.db`), and future resume capability
+* **Output Equivalence**: Document that both runners produce functionally identical outputs; choice of runner is about execution model (CLI vs graph) not output quality
+* **Troubleshooting Guide**: Common issues (LangGraph runner fails to load templates, checkpoint database corruption, output format differences) with resolution steps
+* **Operator Configuration**: Document new environment variable `LANGGRAPH_RUNNER_IMAGE` for configuring LangGraph container image
+* **Migration Path**: Clarify that there is NO migration needed; existing workflows remain on Claude Code; new workflows can opt-in to LangGraph
 
 **Questions to answer:**
 
-**Architectural Questions:**
+**Implementation Questions:**
 
-1. **Graph Definition Format**: Should we support only Python-based graph definitions (via code), or also provide JSON/YAML declarative format for simpler workflows?
-   * *Recommendation*: Start with Python-only (leverages full LangGraph API); consider declarative format post-MVP if user feedback indicates need
+1. **Template Reuse Strategy**: Should LangGraph runner execute SpecKit CLI commands (subprocess) or parse templates directly and call Claude API natively?
+   * *Recommendation*: Hybrid approach - parse SpecKit templates (`.specify/templates/*.md`) to extract prompts, call Claude API directly via LangChain, avoid subprocess overhead
 
-2. **Checkpointer Backend**: Is SQLite sufficient for checkpoint persistence, or should we provide Postgres option for high-scale deployments?
-   * *Recommendation*: SQLite for MVP (simpler, no additional infrastructure); add Postgres option in Phase 2 if performance testing indicates need
+2. **Checkpoint Pruning Policy**: Keep last N checkpoints per session - what is appropriate N value?
+   * *Recommendation*: Keep last 10 checkpoints; configurable via environment variable `CHECKPOINT_RETENTION_COUNT`
 
-3. **Workflow Registry**: Should we implement a central workflow registry/catalog, or rely on Git repositories as source of truth for workflow definitions?
-   * *Recommendation*: Git-as-source-of-truth for MVP (consistent with RFE model); consider registry if we reach 20+ workflow types
+3. **Default Runner Value**: Should default be explicit (`claude-code`) or implicit (empty string means Claude Code)?
+   * *Recommendation*: Explicit default `claude-code` in CRD schema; clearer for users and eliminates ambiguity
 
-4. **CRD Unification**: Should we create unified `WorkflowTemplate` CRD or maintain separate CRDs per workflow type (RFEWorkflow, LangGraphWorkflow)?
-   * *Recommendation*: Separate CRDs for MVP (type safety, clear schemas); consider unified template if we exceed 5 workflow types
-
-**Security Questions:**
-
-5. **Graph Validation Depth**: Is AST-based validation sufficient, or do we need runtime sandboxing (e.g., gVisor, Kata Containers)?
-   * *Recommendation*: AST validation + import whitelist for MVP; monitor for evasion attempts; escalate to sandboxing if needed
-
-6. **Checkpoint Encryption**: Should checkpoints be encrypted at rest beyond PVC-level encryption?
-   * *Recommendation*: PVC encryption sufficient for MVP; add application-level encryption if storing sensitive credentials in state
+4. **Graph Definition Location**: Should RFE workflow graph be hardcoded in LangGraph runner or loaded from file (`.specify/graphs/rfe.py`)?
+   * *Recommendation*: Hardcoded for MVP (single workflow, no customization needed); consider file-based in post-MVP if users request graph customization
 
 **Operational Questions:**
 
-7. **Checkpoint Retention**: What is appropriate retention policy for checkpoints? (Current proposal: keep last 10)
-   * *Needs Input*: Storage team input on PVC capacity and growth projections
+5. **Checkpoint Storage Growth**: What is estimated checkpoint database size? How quickly does it grow?
+   * *Needs Input*: Storage team input on PVC capacity and growth monitoring
 
-8. **Timeout Configuration**: What are appropriate defaults for graph node timeouts and human-in-the-loop wait times?
-   * *Recommendation*: 30-minute default timeout per node; 24-hour HITL wait time; both configurable per workflow
+6. **Runner Image Registry**: Where should LangGraph runner image be published? Same registry as Claude Code runner?
+   * *Recommendation*: Same registry (`quay.io/ambient-code/langgraph-runner`), same tagging strategy (version tags + latest)
 
-9. **Observability Metrics**: What Prometheus metrics should we expose?
-   * *Recommendation*: Graph execution time, node execution time, checkpoint save/load latency, active sessions by workflow type
+7. **Observability Metrics**: What metrics should LangGraph runner expose initially?
+   * *Recommendation*: MVP metrics - session status, node execution time, checkpoint save latency; defer Prometheus integration to post-MVP
+
+8. **Failure Scenarios**: What happens if LangGraph runner crashes mid-execution?
+   * *Recommendation*: Checkpoint preserves state; operator restarts pod; session can resume from last checkpoint (post-MVP feature); MVP behavior: session marked failed, user restarts manually
 
 **Integration Questions:**
 
-10. **Frontend Changes**: Should LangGraph workflows have distinct UI from RFE workflows, or unified session interface?
-    * *Recommendation*: Unified session interface (both are AgenticSessions); add workflow-specific details panel
+9. **Frontend Changes**: Does frontend need changes to support runner selection?
+   * *Recommendation*: Not for MVP (selection via API/kubectl only); add dropdown in post-MVP
+
+10. **Seeding Compatibility**: Are there any changes needed to repo seeding logic for LangGraph runner?
+    * *Answer*: No changes needed; both runners use same `.specify/templates/` directory structure
+
+**Validation Questions:**
+
+11. **Output Equivalence Testing**: How do we validate that LangGraph outputs are equivalent to Claude Code outputs?
+    * *Recommendation*: Automated test suite that compares section headers, content length, markdown structure; manual review of 10 sample outputs for quality equivalence
+
+12. **Backward Compatibility Testing**: What test cases ensure existing workflows are unaffected?
+    * *Recommendation*: Run 50 existing RFE workflows without `runner` field; verify all execute on Claude Code runner; compare outputs to historical baselines
 
 **Background & Strategic Fit:**
 
 **Problem Context:**
 
-The vTeam platform was designed as a "virtual team" of AI agents for software development automation. The initial implementation focused on the RFE (Request for Enhancement) workflow, leveraging Claude Code's interactive CLI model with SpecKit templates to generate comprehensive feature specifications. This pattern works excellently for its intended purpose: guided, conversational spec creation with human feedback.
+The vTeam platform currently executes RFE workflows using the Claude Code runner, which wraps the Claude Code CLI tool. This approach works well for interactive, conversational specification generation, but has limitations:
 
-However, teams have expressed interest in automating workflows that don't fit the interactive CLI model:
-* **Approval workflows** requiring branching logic (approve/reject/escalate)
-* **Research pipelines** with parallel execution (search multiple sources simultaneously)
-* **Multi-step decision trees** with complex state machines (incident response, deployment gates)
-* **Batch processing** with retry logic and error handling
-
-These patterns are more naturally expressed as directed acyclic graphs than as sequential CLI interactions.
+* **Opaque Execution**: CLI interaction is black-box from observability perspective; difficult to understand what stage workflow is in
+* **No Pause/Resume**: Cannot pause mid-workflow to review intermediate outputs (e.g., review spec before generating plan); must complete entire workflow or start over
+* **Limited Extensibility**: Adding features like approval gates, validation steps, or conditional logic requires modifying Claude Code CLI, which is external dependency
+* **Single Execution Model**: All RFE workflows forced into CLI interaction model, even when graph-based orchestration might be more appropriate
 
 **Strategic Value:**
 
-1. **Platform Extensibility**: Establishes vTeam as a general-purpose agentic automation platform, not just an RFE tool
-2. **Competitive Positioning**: Multi-workflow support positions vTeam alongside platforms like Temporal, Airflow, but with AI-native execution
-3. **Technology Investment**: LangGraph represents state-of-the-art in stateful agent orchestration; early adoption builds expertise
-4. **Architecture Validation**: Tests whether the runner-shell abstraction (designed for extensibility) actually delivers on that promise
+1. **Validates Runner-Shell Abstraction**: Proves that the runner-shell interface successfully abstracts execution engine; adding second runner validates architectural investment
+2. **Foundation for Advanced Features**: Checkpointed execution enables future enhancements (human-in-the-loop review, resume from any stage, validation gates) without changing core infrastructure
+3. **Technology Evaluation**: LangGraph represents state-of-the-art in stateful agent orchestration; adding as runner option allows team to gain experience with technology before broader adoption
+4. **Risk Mitigation**: By maintaining Claude Code runner as default, we derisk LangGraph adoption; users opt-in to new runner, existing workflows unaffected
+5. **Competitive Positioning**: Checkpointed, observable workflow execution differentiates vTeam from simpler automation tools
 
 **Alignment with vTeam Architecture:**
 
-The existing vTeam architecture was designed with extensibility in mind:
-* **Runner-Shell Abstraction**: Protocol-based interface enabling multiple execution engines
-* **Operator Pattern**: Workflow-agnostic job creation (just needs runner image selection)
-* **PVC-Centric State**: All state persisted on PVC, whether `.claude/` or `.langgraph/`
-* **WebSocket Transport**: Bidirectional streaming works for any runner type
+The runner-shell abstraction was explicitly designed to support multiple execution engines:
+* **Protocol Interface**: `MessageType`, `SessionStatus` enums work for any runner
+* **Transport Layer**: WebSocket streaming is runner-agnostic
+* **Context Management**: Workspace, environment variables handled uniformly
+* **State Persistence**: PVC-based state works for `.claude/` or `.langgraph/` directories
 
-This enhancement validates these architectural decisions by adding a second runner without modifying core infrastructure.
+This enhancement validates that architectural design delivers on its promise. Adding LangGraph runner requires:
+* **Zero changes** to runner-shell protocol, transport, or context
+* **Minimal changes** to operator (single function for image selection)
+* **No changes** to backend API contract (AgenticSession spec unchanged)
 
 **Technology Rationale:**
 
-**Why LangGraph?**
-* **State Management**: Built-in checkpointing and state persistence (critical for long-running workflows)
-* **Graph Execution Model**: Natural fit for branching logic, parallel execution, conditional paths
-* **LangChain Ecosystem**: Access to extensive library of integrations (APIs, databases, tools)
-* **Human-in-the-Loop**: Native support for interrupt nodes requiring human input
-* **Observability**: Structured event streaming for debugging and monitoring
+**Why LangGraph for RFE Workflow?**
+
+LangGraph may seem overengineered for a simple 3-node linear graph (specify → plan → tasks), but it provides:
+
+1. **Checkpointed Execution**: Automatic state persistence after each node; foundation for pause/resume
+2. **Structured Events**: Graph emits events for node start/end, state updates; enables rich observability
+3. **Extensibility Foundation**: Easy to add nodes (validation, approval, research) without rewriting orchestration
+4. **Proven Technology**: LangGraph is production-ready, actively maintained, widely adopted in AI agent space
+5. **Minimal Learning Curve**: Graph definition is simple Python; no complex DSL or configuration format
 
 **Why Not Alternatives?**
-* **CrewAI**: Sequential execution model, less suitable for complex branching
-* **AutoGPT**: Autonomous loop model, harder to control and debug
-* **Custom Framework**: Reinventing state management and checkpointing is high risk
+* **Direct Implementation**: Could implement checkpointing ourselves, but reinventing state management is high-risk and error-prone
+* **CrewAI**: More opinionated about multi-agent collaboration; less suitable for simple pipeline orchestration
+* **Temporal/Airflow**: General-purpose workflow engines; overkill for AI agent workflows; not LLM-native
+
+**LangGraph Trade-offs:**
+* **Pros**: Battle-tested checkpointing, rich ecosystem, active development, LLM-native design
+* **Cons**: Additional dependency (Python package), learning curve for team, checkpoint storage overhead (~50KB per checkpoint)
+
+**Decision**: Benefits outweigh costs; LangGraph provides professional-grade state management we would otherwise have to build ourselves.
 
 **Prior Art:**
 
-Similar multi-workflow patterns exist in:
-* **GitHub Actions**: Workflows defined in YAML, multiple execution engines (Docker, VM, self-hosted)
-* **Temporal**: Workflow orchestration with multiple SDKs (Go, Java, Python)
-* **Kubeflow Pipelines**: DAG-based ML workflows with custom operators
+Other platforms with multiple runner support:
+* **GitHub Actions**: Workflows run on GitHub-hosted runners, self-hosted runners, or Actions Runner Controller (Kubernetes); runner selection via `runs-on` field
+* **GitLab CI**: Pipelines run on shared runners, specific runners, or group runners; runner selection via tags
+* **Jenkins**: Jobs run on controller or agents; agent selection via labels
 
-vTeam's approach is differentiated by:
-1. Kubernetes-native Custom Resource model
-2. AI-agent-first execution (not general-purpose compute)
-3. Runner-shell abstraction enabling polyglot runners
+vTeam's approach is similar:
+* Single workflow type (RFE) with multiple execution engines (runners)
+* Runner selection via explicit field in workflow specification
+* Operator dispatches to appropriate runner based on field value
+* Both runners produce equivalent outputs
 
 **Customer Considerations**
 
 **Deployment Considerations:**
 
-* **Image Registry**: LangGraph runner requires separate container image; ensure image registry has capacity and appropriate retention policies
-* **Resource Quotas**: LangGraph graphs may have different resource profiles than Claude Code (e.g., parallel node execution); review namespace quotas
-* **Network Policies**: Verify LangGraph runner can reach backend WebSocket endpoint; no additional network policy changes expected
-* **Storage**: Checkpoint database (`.langgraph/checkpoints.db`) grows with workflow complexity; monitor PVC usage and implement pruning
+* **Container Image**: LangGraph runner requires separate container image (`quay.io/ambient-code/langgraph-runner:latest`); ensure image registry has capacity
+* **Resource Quotas**: LangGraph runner has similar resource profile to Claude Code runner (single-threaded, CPU-bound during LLM API calls); no quota changes expected
+* **Network Policies**: LangGraph runner needs same network access as Claude Code runner (backend WebSocket, Anthropic API); no policy changes needed
+* **Storage**: Checkpoint database adds ~50KB per session; with 1000 sessions, ~50MB total; negligible compared to workspace files (spec.md, plan.md, tasks.md)
+* **Dependency Management**: LangGraph runner packages all Python dependencies in container image; no runtime pip installs required
 
 **Migration Path for Existing Users:**
 
-* **No Action Required**: Existing RFE workflows continue to work without changes; default behavior preserved
-* **Opt-In Model**: Users explicitly choose LangGraph by setting `workflowType: langgraph` when creating sessions
-* **Training & Enablement**: Provide workshops on when to use Claude Code vs. LangGraph; decision framework based on use case
+* **No Migration Needed**: Existing RFE workflows continue to use Claude Code runner by default; no user action required
+* **Opt-In Model**: Users who want LangGraph benefits explicitly set `runner: langgraph` when creating new workflows
+* **Decision Framework**: Document when to use each runner:
+  - **Claude Code**: Default choice, proven, stable, interactive experience
+  - **LangGraph**: Opt-in for checkpointed execution, structured observability, foundation for approval gates (post-MVP)
+* **Training Materials**: Provide comparison guide, demo video showing checkpoint behavior, FAQ on runner differences
 
 **Customer-Specific Requirements:**
 
-* **Red Hat Customers**: Ensure LangGraph runner image is available in Red Hat container catalog; verify OpenShift compatibility (no privileged containers required)
-* **Air-Gapped Deployments**: Package LangGraph Python dependencies in container image (no runtime pip installs); provide offline documentation
-* **Multi-Tenancy**: LangGraphWorkflow CRDs are namespace-scoped (same as RFEWorkflow); RBAC enforcement consistent across workflow types
-* **Compliance**: Graph validation (AST parsing, import whitelist) prevents arbitrary code execution; meets security requirements for regulated industries
+* **Red Hat Customers**: Ensure LangGraph runner image is available in Red Hat container catalog with appropriate certifications; verify OpenShift compatibility (no privileged containers, runs as non-root)
+* **Air-Gapped Deployments**: Package LangGraph runner image with all dependencies (LangGraph, LangChain, Anthropic SDK); no internet access required at runtime
+* **Multi-Tenancy**: Runner selection is per-RFEWorkflow, which is namespace-scoped; tenants isolated as with existing Claude Code runner
+* **Compliance**: LangGraph runner calls Anthropic API (same as Claude Code); no additional compliance concerns; checkpoint data stored on PVC (same encryption as workspace files)
 
 **Support Considerations:**
 
-* **Debugging**: Provide tools for inspecting checkpoint state, replaying graph execution, viewing node-level logs
-* **Error Messages**: Ensure validation failures provide clear, actionable error messages (e.g., "Import 'os.system' is not allowed. Use subprocess with explicit commands.")
-* **Upgrade Path**: Checkpoint schema compatibility across LangGraph versions; test upgrades with checkpoint migration if schema changes
+* **Debugging**: Provide tools for inspecting checkpoint database (CLI tool: `checkpoint-inspect`), viewing graph execution trace, comparing outputs between runners
+* **Error Messages**: LangGraph validation failures should provide clear guidance (e.g., "Failed to load SpecKit template: .specify/templates/spec-template.md not found. Ensure repositories are seeded.")
+* **Performance**: If LangGraph runner is slower than Claude Code, investigate checkpoint I/O overhead; consider async checkpoint writes
+* **Compatibility**: Document which LangGraph versions are supported; test checkpoint schema compatibility across LangGraph updates
 
 **Cost Considerations:**
 
-* **Infrastructure**: Minimal incremental cost (separate container image, same Kubernetes Jobs model)
-* **Anthropic API**: LangGraph workflows consume API credits based on LLM calls within graph nodes; provide cost estimation tool
-* **Storage**: Checkpoint databases grow over time; implement pruning to manage PVC costs
+* **Infrastructure**: Minimal incremental cost - separate container image (~500MB), same compute resources as Claude Code runner
+* **Anthropic API**: LangGraph runner makes same number of API calls as Claude Code runner (3 calls: specify, plan, tasks); equivalent cost per session
+* **Storage**: Checkpoint database adds ~50KB per session; negligible storage cost
+* **Development**: 2-3 weeks engineering effort for MVP; lower than expected due to simplified scope (no new workflow types, no LangGraph CRD)
 
 **Customer Success Metrics:**
 
-* **Adoption Rate**: % of customers creating LangGraph workflows within 90 days of release
-* **Workflow Diversity**: Number of distinct workflow types created (target: 5+ unique patterns)
-* **Session Success Rate**: % of LangGraph sessions completing successfully (target: >90%)
-* **Time-to-Value**: Time from feature release to first production LangGraph workflow (target: <30 days)
+* **Adoption Rate**: % of RFE workflows created with `runner: langgraph` (target: 10% within 90 days, 25% within 180 days)
+* **Output Quality Equivalence**: User satisfaction scores for LangGraph outputs vs Claude Code outputs (target: within 5% difference)
+* **Session Success Rate**: % of LangGraph sessions completing successfully (target: >95%, matching Claude Code success rate)
+* **Checkpoint Usage**: % of failed LangGraph sessions that resume from checkpoint in post-MVP (target: >50% utilization)
+* **Support Tickets**: Number of LangGraph-related support tickets (target: <5 per month, indicating stable implementation)
 
 **Risk Mitigation:**
 
-* **Feature Flag**: Consider gating LangGraph workflows behind feature flag for phased rollout
-* **Early Access Program**: Pilot with 3-5 strategic customers before GA
-* **Fallback Plan**: If adoption is low or technical issues arise, maintain existing RFE workflow as stable baseline
+* **Backward Compatibility**: Default to Claude Code runner; existing workflows unaffected; risk of breaking changes: **low**
+* **Output Quality**: Validate LangGraph outputs match Claude Code quality through automated testing and manual review; risk of quality degradation: **medium** (mitigated by equivalence testing)
+* **Performance**: Benchmark LangGraph runner against Claude Code runner; ensure comparable execution time; risk of performance regression: **low** (checkpoint writes are async)
+* **Adoption**: If adoption is low (<5% after 180 days), maintain LangGraph runner as experimental feature and deprioritize enhancements; risk of wasted effort: **low** (2-3 week investment)
+* **Maintenance Burden**: LangGraph runner adds second runner to maintain (dependencies, updates, bug fixes); mitigate by ensuring runner-shell abstraction minimizes duplicated code; risk: **medium** (accepted trade-off for innovation)

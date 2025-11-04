@@ -1,4 +1,4 @@
-# Technical Architecture: LangGraph Workflow Integration
+# Technical Architecture: LangGraph Runner for RFE Workflow
 
 **Author:** Stella (Staff Engineer)
 **Date:** 2025-11-04
@@ -6,9 +6,9 @@
 
 ## Executive Summary
 
-This document provides technical architecture guidance for adding LangGraph-based workflow support to the Ambient Agentic Runner (vTeam) platform. The analysis focuses on maintaining architectural integrity while introducing a new execution engine alongside the existing Claude Code + SpecKit workflow.
+This document provides technical architecture guidance for adding a LangGraph runner option to the existing RFE workflow in the Ambient Agentic Runner (vTeam) platform. The analysis focuses on maintaining architectural integrity while introducing runner choice with minimal infrastructure changes.
 
-**Key Finding:** The existing runner-shell abstraction is well-designed for multi-runner support and requires minimal modifications. The primary challenge is workflow lifecycle management and state persistence patterns that differ between CLI-based and graph-based execution.
+**Key Finding:** The existing runner-shell abstraction is well-designed for multi-runner support. The primary implementation is a single CRD field addition and operator image selection logic. Both runners execute the same RFE workflow (specify → plan → tasks) and produce identical outputs.
 
 ---
 
@@ -43,34 +43,39 @@ Create a parallel adapter following the same pattern:
 ```python
 # NEW FILE: /components/runners/langgraph-runner/adapter.py
 
+from runner_shell.core.context import RunnerContext
+from runner_shell.core.protocol import MessageType
+from langgraph.graph import StateGraph
+from langgraph.checkpoint.sqlite import AsyncSqliteSaver
+
 class LangGraphAdapter:
-    """Adapter for LangGraph graph execution engine"""
+    """Adapter for LangGraph execution of RFE workflow"""
 
     def __init__(self):
         self.context = None
         self.shell = None
         self.graph = None
-        self.checkpointer = None  # LangGraph's StateGraph persistence
+        self.checkpointer = None
 
     async def initialize(self, context: RunnerContext):
         """
         Initialize LangGraph runtime:
-        - Load graph definition from workspace or config
-        - Set up checkpointer (SQLite/Postgres for state)
-        - Configure human-in-the-loop callbacks
+        - Load RFE graph definition (specify → plan → tasks)
+        - Load SpecKit templates from .specify/ directory
+        - Set up checkpointer (SQLite for state)
+        - Configure streaming output
         """
         self.context = context
-        graph_config = self._load_graph_config()
-        self.graph = self._build_graph(graph_config)
-        self.checkpointer = self._setup_checkpointer()
+        self.graph = self._build_rfe_graph()
+        self.checkpointer = await self._setup_checkpointer()
 
     async def run(self):
         """
-        Execute graph with streaming:
+        Execute RFE workflow graph:
         - If continuing: load checkpoint from parent session
         - Stream node execution via WebSocket
-        - Handle interrupts for human-in-the-loop
-        - Persist checkpoints to PVC
+        - Save checkpoints after each node
+        - Write spec.md, plan.md, tasks.md to workspace
         """
         thread_id = self.context.session_id
 
@@ -79,9 +84,9 @@ class LangGraphAdapter:
         if parent_session:
             thread_id = await self._get_parent_thread_id(parent_session)
 
-        # Execute with checkpoint persistence
+        # Execute RFE graph with checkpoint persistence
         async for event in self.graph.astream_events(
-            input_data,
+            {"prompt": self.context.get_env("PROMPT", "")},
             config={"configurable": {"thread_id": thread_id}},
             version="v1"
         ):
@@ -90,10 +95,18 @@ class LangGraphAdapter:
     async def handle_message(self, message: dict):
         """
         Handle backend messages:
-        - interrupt: pause graph execution
-        - user_message: resume with user input (human-in-the-loop)
         - end_session: gracefully terminate
         """
+
+    def _build_rfe_graph(self) -> StateGraph:
+        """
+        Build RFE workflow graph with 3 nodes:
+        - specify: Generate spec.md using SpecKit spec template
+        - plan: Generate plan.md using SpecKit plan template
+        - tasks: Generate tasks.md using SpecKit tasks template
+        """
+        from rfe_graph import create_rfe_graph
+        return create_rfe_graph(self.context.workspace_path)
 ```
 
 **Key Design Decisions:**
@@ -102,6 +115,7 @@ class LangGraphAdapter:
 2. **Adapter implements same interface** - `initialize()`, `run()`, `handle_message()`
 3. **State persistence uses PVC** - LangGraph checkpointer writes to `/workspace/sessions/{session-id}/.langgraph/`
 4. **WebSocket protocol unchanged** - same message types, just different content
+5. **SpecKit template reuse** - Load templates from `.specify/templates/` like Claude Code runner
 
 ### Technical Risk: Dependency Conflicts
 
@@ -109,828 +123,232 @@ class LangGraphAdapter:
 
 **Mitigation Strategy:**
 ```dockerfile
-# Option 1: Separate container images (RECOMMENDED)
+# Separate container images (RECOMMENDED)
 FROM python:3.11 AS langgraph-runner
 RUN pip install langgraph langchain-core langchain-anthropic
-
-# Option 2: Conditional imports with virtual environments
-# Use venv or pipx for isolated dependencies
+COPY . /app
+WORKDIR /app
+CMD ["python", "adapter.py"]
 ```
 
-**Recommendation:** Build separate container images for each runner type. The operator can select the image based on workflow type (see Section 4).
+**Recommendation:** Build separate container images for each runner type. The operator can select the image based on runner field (see Section 3).
 
 ---
 
-## 2. Workflow Extensibility: Registration & Discovery
+## 2. RFE Workflow Graph Design
 
-### Current State: Hardcoded RFE Workflow
+### RFE Workflow Stages
 
-The current implementation has a 1:1 relationship between workflow type (RFE) and runner (Claude Code):
-- Backend has RFEWorkflow CRD (`/components/manifests/crds/rfeworkflows-crd.yaml`)
-- Operator hardcodes runner image in Job spec (`/components/operator/internal/handlers/sessions.go:398`)
-- No abstraction for multiple workflow types
+Both runners execute the same 3-stage workflow:
 
-### Recommended Pattern: Workflow Type Registry
-
-**Option A: CRD-per-workflow-type (RECOMMENDED for MVP)**
-
-Create a new `LangGraphWorkflow` CRD parallel to `RFEWorkflow`:
-
-```yaml
-# NEW FILE: /components/manifests/crds/langgraphworkflows-crd.yaml
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: langgraphworkflows.vteam.ambient-code
-spec:
-  group: vteam.ambient-code
-  names:
-    kind: LangGraphWorkflow
-    plural: langgraphworkflows
-    shortNames: [lgw]
-  versions:
-  - name: v1alpha1
-    schema:
-      openAPIV3Schema:
-        type: object
-        properties:
-          spec:
-            type: object
-            required: [graphDefinition]
-            properties:
-              graphDefinition:
-                type: string
-                description: "Path to graph definition file in workspace"
-              checkpointerType:
-                type: string
-                enum: [sqlite, postgres, memory]
-                default: sqlite
-              humanInTheLoop:
-                type: boolean
-                description: "Enable human-in-the-loop interrupts"
-              repos:
-                type: array
-                description: "Repositories (same as AgenticSession.repos)"
+```
+┌──────────┐     ┌──────────┐     ┌──────────┐
+│ Specify  │ ──▸ │   Plan   │ ──▸ │  Tasks   │
+└──────────┘     └──────────┘     └──────────┘
+    │                │                │
+    ▼                ▼                ▼
+ spec.md         plan.md          tasks.md
 ```
 
-**Backend handler structure:**
-```go
-// NEW FILE: /components/backend/handlers/langgraph.go
+### LangGraph Implementation
 
-func CreateProjectLangGraphWorkflow(c *gin.Context) {
-    // Similar to CreateProjectRFEWorkflow
-    // Creates LangGraphWorkflow CR
-    // Validates graph definition exists
-}
-
-func ListProjectLangGraphWorkflows(c *gin.Context) {
-    // List LangGraphWorkflow CRs in project namespace
-}
-```
-
-**Pros:**
-- Clear separation of workflow concerns
-- Type-safe validation per workflow type
-- Easy to version independently
-- Familiar pattern (mirrors RFEWorkflow)
-
-**Cons:**
-- Code duplication (each workflow needs handlers, CRDs, etc.)
-- Operator needs to watch multiple CRD types
-
----
-
-**Option B: Unified WorkflowTemplate CRD (FUTURE)**
-
-Create a generic workflow abstraction:
-
-```yaml
-# FUTURE: /components/manifests/crds/workflowtemplates-crd.yaml
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: workflowtemplates.vteam.ambient-code
-spec:
-  group: vteam.ambient-code
-  names:
-    kind: WorkflowTemplate
-    plural: workflowtemplates
-  versions:
-  - name: v1alpha1
-    schema:
-      openAPIV3Schema:
-        properties:
-          spec:
-            type: object
-            required: [type, runnerImage]
-            properties:
-              type:
-                type: string
-                enum: [rfe, langgraph, custom]
-              runnerImage:
-                type: string
-                description: "Container image for this workflow type"
-              configSchema:
-                type: object
-                description: "JSON Schema for workflow-specific configuration"
-                x-kubernetes-preserve-unknown-fields: true
-```
-
-**Pros:**
-- Single operator watch loop
-- Extensible to future workflow types without new CRDs
-- Configuration-driven approach
-
-**Cons:**
-- Loss of type safety (schema validation moves to runtime)
-- More complex operator logic
-- Harder to version workflow-specific features
-
-**Recommendation:** Start with **Option A (CRD-per-workflow)** for MVP, refactor to Option B if we need to support 5+ workflow types.
-
----
-
-## 3. Runner Lifecycle: CLI vs Graph Execution
-
-### Key Differences
-
-| Aspect | Claude Code (CLI) | LangGraph (Graph) |
-|--------|-------------------|-------------------|
-| **Execution Model** | Interactive CLI process | Declarative graph traversal |
-| **State Persistence** | SDK manages `.claude` dir | Checkpointer (DB or file) |
-| **Resumption** | SDK's built-in `resume` option | Thread ID + checkpoint lookup |
-| **Human-in-the-loop** | Interactive mode (user_message) | Graph interrupt nodes |
-| **Streaming** | Line-by-line output | Node execution events |
-
-### State Management Patterns
-
-**Claude Code Pattern (current):**
 ```python
-# From wrapper.py:219-228
-if is_continuation and parent_session_id:
-    sdk_resume_id = await self._get_sdk_session_id(parent_session_id)
-    if sdk_resume_id:
-        options.resume = sdk_resume_id
-        options.fork_session = False
-```
+# NEW FILE: /components/runners/langgraph-runner/rfe_graph.py
 
-**LangGraph Pattern (recommended):**
-```python
-class LangGraphAdapter:
-    async def _resume_from_checkpoint(self, parent_session_id: str):
-        """
-        Resume graph execution from parent's checkpoint:
-        1. Read parent's thread_id from CR annotation
-        2. Load checkpoint from shared PVC path
-        3. Resume graph execution from last node
-        """
-        parent_thread_id = await self._get_thread_id_from_annotation(parent_session_id)
-
-        # Checkpointer reads from /workspace/sessions/{parent}/..langgraph/
-        checkpoint = await self.checkpointer.aget(
-            config={"configurable": {"thread_id": parent_thread_id}}
-        )
-
-        if checkpoint:
-            return parent_thread_id  # Use same thread for continuation
-        else:
-            raise RuntimeError(f"No checkpoint found for {parent_session_id}")
-```
-
-**Checkpoint Storage Location:**
-```bash
-# PVC structure for LangGraph sessions
-/workspace/sessions/
-  {session-id}/
-    workspace/          # Git repos
-    .langgraph/         # Checkpoints (SQLite or JSON)
-      checkpoints.db
-      thread_{id}.json
-    .claude/            # Claude SDK state (RFE workflows)
-```
-
-### Human-in-the-Loop Implementation
-
-**LangGraph interrupts** are first-class:
-```python
 from langgraph.graph import StateGraph
-
-graph = StateGraph(AgentState)
-graph.add_node("agent", agent_node)
-graph.add_node("human", human_node)  # Interrupt here
-
-# Configure interrupt before human node
-graph.add_edge("agent", "human")
-graph.add_conditional_edges("human", should_continue)
-
-# Execution automatically pauses at interrupt
-```
-
-**Integration with runner-shell:**
-```python
-async def _handle_graph_event(self, event):
-    if event["event"] == "on_interrupt":
-        # Send WAITING_FOR_INPUT message
-        await self.shell._send_message(
-            MessageType.WAITING_FOR_INPUT,
-            {"node": event["name"], "state": event["data"]}
-        )
-        # Wait for user_message from handle_message()
-        await self._wait_for_user_input()
-```
-
----
-
-## 4. API & CRD Design
-
-### AgenticSession Extension
-
-**Current AgenticSession CRD** (`agenticsessions-crd.yaml`) is workflow-agnostic. This is good design.
-
-**Recommended additions:**
-```yaml
-# MODIFY: /components/manifests/crds/agenticsessions-crd.yaml
-spec:
-  properties:
-    workflowType:
-      type: string
-      enum: [rfe, langgraph]  # Extensible
-      description: "Workflow type - determines runner image"
-    workflowRef:
-      type: object
-      description: "Reference to workflow definition (RFEWorkflow or LangGraphWorkflow)"
-      properties:
-        kind:
-          type: string
-          enum: [RFEWorkflow, LangGraphWorkflow]
-        name:
-          type: string
-    runnerConfig:
-      type: object
-      description: "Runner-specific configuration"
-      x-kubernetes-preserve-unknown-fields: true
-```
-
-**Backend session creation:**
-```go
-// MODIFY: /components/backend/handlers/sessions.go
-
-type CreateAgenticSessionRequest struct {
-    // ... existing fields
-    WorkflowType string                 `json:"workflowType,omitempty"`  // "rfe" or "langgraph"
-    WorkflowRef  *WorkflowReference     `json:"workflowRef,omitempty"`
-    RunnerConfig map[string]interface{} `json:"runnerConfig,omitempty"`
-}
-
-type WorkflowReference struct {
-    Kind string `json:"kind"` // "RFEWorkflow" or "LangGraphWorkflow"
-    Name string `json:"name"` // CR name in same namespace
-}
-```
-
-### Operator Job Creation Logic
-
-**Current pattern** (from `sessions.go:398`):
-```go
-Image: appConfig.AmbientCodeRunnerImage,  // Hardcoded
-```
-
-**Recommended pattern:**
-```go
-// MODIFY: /components/operator/internal/handlers/sessions.go
-
-func getRunnerImageForWorkflow(spec map[string]interface{}) string {
-    workflowType, _, _ := unstructured.NestedString(spec, "workflowType")
-
-    switch workflowType {
-    case "langgraph":
-        return appConfig.LangGraphRunnerImage
-    case "rfe", "":  // Default to RFE for backward compatibility
-        return appConfig.AmbientCodeRunnerImage
-    default:
-        log.Printf("Unknown workflow type %s, defaulting to RFE runner", workflowType)
-        return appConfig.AmbientCodeRunnerImage
-    }
-}
-
-// In job creation (line 398):
-Image: getRunnerImageForWorkflow(spec),
-```
-
-**Configuration:**
-```yaml
-# MODIFY: /components/operator/internal/config/config.go
-type Config struct {
-    // ... existing fields
-    AmbientCodeRunnerImage string  // Existing: Claude Code runner
-    LangGraphRunnerImage   string  // NEW: LangGraph runner
-}
-
-// Environment variables
-AMBIENT_CODE_RUNNER_IMAGE=quay.io/ambient-code/claude-runner:latest
-LANGGRAPH_RUNNER_IMAGE=quay.io/ambient-code/langgraph-runner:latest
-```
-
----
-
-## 5. Technical Risks & Mitigation
-
-### Risk 1: Dependency Hell
-
-**Problem:** LangGraph requires LangChain, which has 50+ dependencies. Potential conflicts with Claude SDK.
-
-**Mitigation:**
-- **Separate container images** (one per runner type)
-- Use multi-stage Docker builds to minimize image size
-- Pin dependency versions with `requirements.lock`
-
-**Testing strategy:**
-```bash
-# CI pipeline: test both runners in isolation
-docker build -t claude-runner -f Dockerfile.claude .
-docker build -t langgraph-runner -f Dockerfile.langgraph .
-
-# Integration test: verify no dependency conflicts
-pytest tests/test_claude_runner.py
-pytest tests/test_langgraph_runner.py
-```
-
-### Risk 2: Checkpoint Persistence
-
-**Problem:** LangGraph checkpoints can be large (graph state + message history). PVC I/O performance critical.
-
-**Mitigation:**
-- Use SQLite for checkpointer (better than JSON for large state)
-- Implement checkpoint pruning (delete old checkpoints after N days)
-- Consider async checkpointer implementation for better performance
-
-**Implementation example:**
-```python
-from langgraph.checkpoint.sqlite import AsyncSqliteSaver
-
-async def _setup_checkpointer(self):
-    checkpoint_path = Path(self.context.workspace_path).parent / ".langgraph" / "checkpoints.db"
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Configure with WAL mode for better concurrency
-    return await AsyncSqliteSaver.from_conn_string(
-        f"sqlite:///{checkpoint_path}?mode=rwc&journal_mode=WAL"
-    )
-```
-
-### Risk 3: Interactive Mode Complexity
-
-**Problem:** LangGraph's human-in-the-loop is node-based. Claude Code's is message-based. Need to unify UX.
-
-**Mitigation:**
-- Abstract interrupt semantics at runner-shell level
-- Use `MessageType.WAITING_FOR_INPUT` consistently for both runners
-- Document differences in UX for each workflow type
-
-**Unified pattern:**
-```python
-# Both runners send same message type when waiting for input
-await self.shell._send_message(
-    MessageType.WAITING_FOR_INPUT,
-    {
-        "prompt": "Waiting for user approval",
-        "context": {...}  # Runner-specific context
-    }
-)
-```
-
-### Risk 4: Migration Path
-
-**Problem:** Existing RFE workflows must continue to work without breaking.
-
-**Mitigation:**
-- **Default behavior:** If `workflowType` is not specified, assume RFE
-- **Backward compatibility:** Existing AgenticSessions use Claude Code runner
-- **Gradual rollout:** Deploy LangGraph runner as opt-in initially
-
-**Version strategy:**
-```yaml
-# CR annotation for versioning
-metadata:
-  annotations:
-    vteam.ambient-code/workflow-version: "v1"
-    vteam.ambient-code/runner-type: "claude-code"  # or "langgraph"
-```
-
----
-
-## 6. Implementation Phases
-
-### Phase 1: Foundation (Week 1-2)
-
-1. Create LangGraph adapter skeleton
-   - File: `/components/runners/langgraph-runner/adapter.py`
-   - Implement basic `initialize()`, `run()`, `handle_message()`
-   - No graph execution yet - just echo messages back
-
-2. Build separate container image
-   - File: `/components/runners/langgraph-runner/Dockerfile`
-   - Install LangGraph + dependencies
-   - Test in isolation (no vTeam integration)
-
-3. Operator configuration changes
-   - Add `LANGGRAPH_RUNNER_IMAGE` to config
-   - Implement `getRunnerImageForWorkflow()` function
-   - Test with mock workflow type
-
-**Success criteria:** Can create AgenticSession with `workflowType: langgraph` and operator launches LangGraph runner container.
-
-### Phase 2: Core Execution (Week 3-4)
-
-1. Implement graph execution
-   - Load graph definition from workspace
-   - Execute with streaming to WebSocket
-   - Handle node events and send via `AGENT_MESSAGE`
-
-2. Checkpoint persistence
-   - SQLite checkpointer to PVC
-   - Test state persistence across pod restarts
-   - Implement checkpoint pruning
-
-3. Session continuation
-   - Load checkpoint from parent session
-   - Resume graph from interrupt point
-   - Verify workspace state preserved
-
-**Success criteria:** LangGraph workflow executes simple graph, persists state, and can resume from checkpoint.
-
-### Phase 3: Human-in-the-Loop (Week 5)
-
-1. Interrupt handling
-   - Pause graph at interrupt nodes
-   - Send `WAITING_FOR_INPUT` message
-   - Resume with user input from WebSocket
-
-2. Interactive mode
-   - Multi-turn conversation with graph
-   - Handle abort/cancel signals
-   - Graceful shutdown
-
-**Success criteria:** Can pause LangGraph execution, get user input via UI, and resume graph.
-
-### Phase 4: API & CRDs (Week 6)
-
-1. LangGraphWorkflow CRD
-   - Define schema
-   - Backend handlers (create, list, get)
-   - Validation logic
-
-2. Frontend integration
-   - UI for creating LangGraph workflows
-   - Graph definition editor (optional for MVP)
-   - Session execution UI (reuse existing)
-
-**Success criteria:** Can create LangGraphWorkflow via API, create session referencing it, and execute graph end-to-end.
-
----
-
-## 7. Open Questions for Discussion
-
-1. **Graph Definition Format:** Should we support:
-   - Python files (`graph.py` in workspace)?
-   - JSON/YAML declarative format?
-   - Both?
-
-2. **Checkpointer Backend:** SQLite sufficient or need Postgres for production?
-   - SQLite: Simple, no extra deps
-   - Postgres: Better for large state, concurrent access
-   - Recommendation: Start with SQLite, add Postgres as optional upgrade
-
-3. **Workflow Versioning:** How to handle graph definition changes?
-   - Immutable workflows (copy-on-edit)?
-   - Version tags in CR?
-   - Git-based versioning?
-
-4. **Observability:** What metrics/logs do we need?
-   - Graph execution timeline (which nodes ran, duration)
-   - Checkpoint size (for PVC capacity planning)
-   - Interrupt/resume statistics
-
-5. **Security:** Graph definitions are Python code - sandboxing?
-   - Run in restricted mode (disable `exec`, `eval`)?
-   - Validate graph AST before execution?
-   - Only allow pre-approved graph templates?
-
----
-
-## 8. Testing Strategy
-
-### Unit Tests
-
-```python
-# tests/runners/test_langgraph_adapter.py
-
-@pytest.mark.asyncio
-async def test_adapter_initialize():
-    adapter = LangGraphAdapter()
-    context = RunnerContext(session_id="test", workspace_path="/tmp/test")
-    await adapter.initialize(context)
-    assert adapter.graph is not None
-
-@pytest.mark.asyncio
-async def test_checkpoint_persistence():
-    adapter = LangGraphAdapter()
-    # ... setup
-    result = await adapter.run()
-    # Verify checkpoint written to PVC
-    checkpoint_path = Path("/workspace/sessions/test/.langgraph/checkpoints.db")
-    assert checkpoint_path.exists()
-```
-
-### Integration Tests
-
-```python
-# tests/integration/test_langgraph_workflow.py
-
-async def test_end_to_end_workflow():
-    # 1. Create LangGraphWorkflow CR via API
-    # 2. Create AgenticSession with workflowType: langgraph
-    # 3. Verify operator creates Job with correct image
-    # 4. Verify graph executes and sends messages via WebSocket
-    # 5. Verify checkpoint persisted
-    # 6. Create continuation session
-    # 7. Verify resumed from checkpoint
-```
-
-### Performance Tests
-
-- **Checkpoint I/O latency:** Measure time to save/load checkpoints of various sizes
-- **Concurrent sessions:** Verify multiple LangGraph sessions can run simultaneously
-- **PVC capacity:** Test behavior when PVC fills up (checkpoint pruning)
-
----
-
-## 9. Documentation Requirements
-
-1. **User Guide:**
-   - How to create LangGraph workflows
-   - Graph definition syntax
-   - Human-in-the-loop patterns
-   - Migration from RFE workflows
-
-2. **Developer Guide:**
-   - How to add new runner types
-   - Runner-shell adapter interface
-   - Checkpoint patterns
-   - Testing workflows locally
-
-3. **Operations Guide:**
-   - Deployment configuration
-   - PVC sizing recommendations
-   - Troubleshooting graph execution
-   - Checkpoint backup/restore
-
----
-
-## 10. Recommendations Summary
-
-### Must Have (MVP)
-
-1. ✅ **Separate container images** - Avoid dependency conflicts
-2. ✅ **LangGraphWorkflow CRD** - Type-safe workflow definitions
-3. ✅ **Operator workflow type selection** - Dynamic runner image selection
-4. ✅ **Checkpoint persistence to PVC** - State management
-5. ✅ **Session continuation support** - Resume from parent checkpoint
-
-### Should Have (Post-MVP)
-
-1. ⚠️ **Postgres checkpointer** - Better performance for large state
-2. ⚠️ **Graph definition validation** - Security and error prevention
-3. ⚠️ **Checkpoint pruning** - PVC management
-4. ⚠️ **Observability metrics** - Graph execution telemetry
-
-### Nice to Have (Future)
-
-1. 💡 **Unified WorkflowTemplate CRD** - Generic workflow abstraction
-2. 💡 **Visual graph editor** - UI for building LangGraph workflows
-3. 💡 **Graph testing framework** - Unit test individual nodes
-4. 💡 **Workflow marketplace** - Share pre-built graphs
-
----
-
-## Appendix A: File Structure
-
-```
-vTeam/
-├── components/
-│   ├── runners/
-│   │   ├── runner-shell/          # Unchanged
-│   │   │   └── runner_shell/
-│   │   │       ├── protocol.py    # Message types (unchanged)
-│   │   │       ├── transport_ws.py
-│   │   │       └── shell.py
-│   │   ├── claude-code-runner/    # Existing
-│   │   │   ├── wrapper.py
-│   │   │   └── Dockerfile
-│   │   └── langgraph-runner/      # NEW
-│   │       ├── adapter.py         # LangGraph adapter
-│   │       ├── graph_loader.py    # Load graph definitions
-│   │       ├── checkpointer.py    # Checkpoint management
-│   │       ├── Dockerfile
-│   │       └── requirements.txt
-│   ├── backend/
-│   │   ├── handlers/
-│   │   │   ├── rfe.go             # Existing
-│   │   │   ├── langgraph.go       # NEW: LangGraph workflow handlers
-│   │   │   └── sessions.go        # Modify: workflow type handling
-│   │   └── types/
-│   │       ├── rfe.go             # Existing
-│   │       └── langgraph.go       # NEW: LangGraphWorkflow types
-│   ├── operator/
-│   │   └── internal/
-│   │       ├── config/
-│   │       │   └── config.go      # Add: LangGraphRunnerImage
-│   │       └── handlers/
-│   │           └── sessions.go    # Modify: getRunnerImageForWorkflow()
-│   └── manifests/
-│       └── crds/
-│           ├── agenticsessions-crd.yaml    # Modify: add workflowType
-│           ├── rfeworkflows-crd.yaml       # Existing
-│           └── langgraphworkflows-crd.yaml # NEW
-```
-
----
-
-## Appendix B: Code Snippets
-
-### B.1: LangGraph Adapter Skeleton
-
-```python
-# /components/runners/langgraph-runner/adapter.py
-
-import asyncio
-import logging
+from typing import TypedDict
 from pathlib import Path
-from typing import Optional, Dict, Any
 
-from langgraph.graph import StateGraph
-from langgraph.checkpoint.sqlite import AsyncSqliteSaver
-from runner_shell.core.context import RunnerContext
-from runner_shell.core.protocol import MessageType
+class RFEState(TypedDict):
+    """State for RFE workflow"""
+    prompt: str
+    workspace_path: str
+    spec_content: str
+    plan_content: str
+    tasks_content: str
 
-logger = logging.getLogger(__name__)
+async def specify_node(state: RFEState) -> RFEState:
+    """
+    Generate specification using SpecKit spec template.
+    Reads: .specify/templates/spec-template.md
+    Writes: spec.md
+    """
+    from template_loader import SpecKitTemplateLoader
 
+    loader = SpecKitTemplateLoader(Path(state["workspace_path"]))
+    spec_template = loader.load_template("spec-template.md")
 
-class LangGraphAdapter:
-    """Adapter for executing LangGraph workflows in vTeam platform."""
+    # Call Claude API with template as system prompt
+    spec_content = await generate_with_claude(
+        system_prompt=spec_template,
+        user_prompt=state["prompt"]
+    )
 
-    def __init__(self):
-        self.context: Optional[RunnerContext] = None
-        self.shell = None
-        self.graph: Optional[StateGraph] = None
-        self.checkpointer: Optional[AsyncSqliteSaver] = None
-        self.thread_id: Optional[str] = None
+    # Write spec.md to workspace
+    spec_path = Path(state["workspace_path"]) / "spec.md"
+    spec_path.write_text(spec_content)
 
-    async def initialize(self, context: RunnerContext):
-        """Initialize LangGraph runtime with workspace context."""
-        self.context = context
-        logger.info(f"Initializing LangGraph adapter for session {context.session_id}")
+    return {**state, "spec_content": spec_content}
 
-        # Load graph definition from workspace
-        graph_path = self._find_graph_definition()
-        self.graph = await self._load_graph(graph_path)
+async def plan_node(state: RFEState) -> RFEState:
+    """
+    Generate implementation plan using SpecKit plan template.
+    Reads: .specify/templates/plan-template.md, spec.md
+    Writes: plan.md
+    """
+    from template_loader import SpecKitTemplateLoader
 
-        # Set up checkpoint persistence
-        self.checkpointer = await self._setup_checkpointer()
+    loader = SpecKitTemplateLoader(Path(state["workspace_path"]))
+    plan_template = loader.load_template("plan-template.md")
 
-        # Determine thread ID (new or resume)
-        parent_session = context.get_env('PARENT_SESSION_ID', '')
-        if parent_session:
-            self.thread_id = await self._get_parent_thread_id(parent_session)
-        else:
-            self.thread_id = context.session_id
+    # Call Claude API with spec.md context
+    plan_content = await generate_with_claude(
+        system_prompt=plan_template,
+        user_prompt=f"Generate plan based on this spec:\n\n{state['spec_content']}"
+    )
 
-    async def run(self) -> Dict[str, Any]:
-        """Execute graph with streaming output to WebSocket."""
-        try:
-            await self._send_log("Starting LangGraph execution...")
+    # Write plan.md to workspace
+    plan_path = Path(state["workspace_path"]) / "plan.md"
+    plan_path.write_text(plan_content)
 
-            # Get initial input from prompt
-            prompt = self.context.get_env("PROMPT", "")
-            if not prompt:
-                raise ValueError("PROMPT environment variable is required")
+    return {**state, "plan_content": plan_content}
 
-            # Execute graph with streaming
-            config = {
-                "configurable": {"thread_id": self.thread_id},
-                "recursion_limit": 100,
-            }
+async def tasks_node(state: RFEState) -> RFEState:
+    """
+    Generate task breakdown using SpecKit tasks template.
+    Reads: .specify/templates/tasks-template.md, plan.md
+    Writes: tasks.md
+    """
+    from template_loader import SpecKitTemplateLoader
 
-            async for event in self.graph.astream_events(
-                {"input": prompt},
-                config=config,
-                version="v1"
-            ):
-                await self._handle_graph_event(event)
+    loader = SpecKitTemplateLoader(Path(state["workspace_path"]))
+    tasks_template = loader.load_template("tasks-template.md")
 
-            await self._send_log("LangGraph execution completed")
+    # Call Claude API with plan.md context
+    tasks_content = await generate_with_claude(
+        system_prompt=tasks_template,
+        user_prompt=f"Generate tasks based on this plan:\n\n{state['plan_content']}"
+    )
 
-            return {
-                "success": True,
-                "thread_id": self.thread_id,
-            }
+    # Write tasks.md to workspace
+    tasks_path = Path(state["workspace_path"]) / "tasks.md"
+    tasks_path.write_text(tasks_content)
 
-        except Exception as e:
-            logger.error(f"LangGraph execution failed: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-            }
+    return {**state, "tasks_content": tasks_content}
 
-    async def handle_message(self, message: Dict[str, Any]):
-        """Handle incoming WebSocket messages (user input, interrupts)."""
-        msg_type = message.get('type', '')
+def create_rfe_graph(workspace_path: str) -> StateGraph:
+    """Build RFE workflow graph"""
+    graph = StateGraph(RFEState)
 
-        if msg_type == 'user_message':
-            # Queue user input for resuming graph
-            payload = message.get('payload', {})
-            user_input = payload.get('content', '')
-            # TODO: Resume graph with user input
+    # Add nodes
+    graph.add_node("specify", specify_node)
+    graph.add_node("plan", plan_node)
+    graph.add_node("tasks", tasks_node)
 
-        elif msg_type == 'interrupt':
-            # Interrupt graph execution
-            # TODO: Implement interrupt handling
-            pass
+    # Define linear workflow
+    graph.set_entry_point("specify")
+    graph.add_edge("specify", "plan")
+    graph.add_edge("plan", "tasks")
+    graph.set_finish_point("tasks")
 
-    async def _handle_graph_event(self, event: Dict[str, Any]):
-        """Process graph execution events and send to backend."""
-        event_type = event.get("event")
-
-        if event_type == "on_chain_start":
-            node_name = event.get("name", "")
-            await self._send_log(f"Executing node: {node_name}")
-
-        elif event_type == "on_chain_end":
-            output = event.get("data", {}).get("output", {})
-            await self.shell._send_message(
-                MessageType.AGENT_MESSAGE,
-                {"type": "node_output", "output": output}
-            )
-
-        elif event_type == "on_interrupt":
-            # Graph hit interrupt node - wait for user input
-            await self.shell._send_message(
-                MessageType.WAITING_FOR_INPUT,
-                {"prompt": "Waiting for user input"}
-            )
-
-    async def _load_graph(self, graph_path: Path) -> StateGraph:
-        """Load graph definition from Python file."""
-        # TODO: Implement graph loading from file
-        # Security consideration: validate graph definition
-        raise NotImplementedError()
-
-    async def _setup_checkpointer(self) -> AsyncSqliteSaver:
-        """Set up SQLite checkpointer for state persistence."""
-        checkpoint_dir = Path(self.context.workspace_path).parent / ".langgraph"
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-        db_path = checkpoint_dir / "checkpoints.db"
-        return await AsyncSqliteSaver.from_conn_string(
-            f"sqlite:///{db_path}?journal_mode=WAL"
-        )
-
-    def _find_graph_definition(self) -> Path:
-        """Locate graph definition file in workspace."""
-        # Look for graph.py in workspace root
-        workspace = Path(self.context.workspace_path)
-        graph_file = workspace / "graph.py"
-
-        if not graph_file.exists():
-            raise FileNotFoundError(
-                f"Graph definition not found at {graph_file}. "
-                "Please create graph.py in your workspace."
-            )
-
-        return graph_file
-
-    async def _get_parent_thread_id(self, parent_session: str) -> str:
-        """Fetch thread ID from parent session for continuation."""
-        # TODO: Query parent session CR for thread_id annotation
-        return parent_session  # Fallback: use session ID as thread ID
-
-    async def _send_log(self, message: str):
-        """Send system log message via WebSocket."""
-        if self.shell:
-            await self.shell._send_message(
-                MessageType.SYSTEM_MESSAGE,
-                {"message": message}
-            )
+    return graph.compile(checkpointer=None)  # Checkpointer set by adapter
 ```
 
-### B.2: Operator Workflow Type Selection
+### SpecKit Template Loading
+
+```python
+# NEW FILE: /components/runners/langgraph-runner/template_loader.py
+
+from pathlib import Path
+from typing import Dict
+
+class SpecKitTemplateLoader:
+    """Load SpecKit templates from .specify/ directory"""
+
+    def __init__(self, workspace_path: Path):
+        self.templates_dir = workspace_path / ".specify" / "templates"
+
+    def load_template(self, template_name: str) -> str:
+        """
+        Load template file and return content.
+        Raises FileNotFoundError if template missing.
+        """
+        template_path = self.templates_dir / template_name
+
+        if not template_path.exists():
+            raise FileNotFoundError(
+                f"SpecKit template not found: {template_path}\n"
+                f"Ensure repositories are seeded before running RFE workflow."
+            )
+
+        return template_path.read_text()
+
+    def list_templates(self) -> Dict[str, Path]:
+        """List all available templates"""
+        if not self.templates_dir.exists():
+            return {}
+
+        return {
+            f.name: f
+            for f in self.templates_dir.glob("*.md")
+        }
+```
+
+---
+
+## 3. Runner Selection: Operator Logic
+
+### Current State: Hardcoded Image
+
+The current implementation hardcodes runner image in Job spec (`/components/operator/internal/handlers/sessions.go:398`):
+
+```go
+Image: appConfig.AmbientCodeRunnerImage,  // Hardcoded Claude Code runner
+```
+
+### Proposed Pattern: Dynamic Image Selection
+
+**Step 1: Add runner field to RFEWorkflow CRD**
+
+```yaml
+# MODIFY: /components/manifests/crds/rfeworkflows-crd.yaml
+
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rfeworkflows.vteam.ambient-code
+spec:
+  # ... existing spec
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          spec:
+            type: object
+            properties:
+              # ... existing fields (title, description, repos, etc.)
+
+              runner:
+                type: string
+                enum:
+                  - claude-code
+                  - langgraph
+                default: claude-code
+                description: |
+                  Execution engine for RFE workflow:
+                  - claude-code: Interactive CLI execution (default)
+                  - langgraph: Graph-based execution with checkpointing
+```
+
+**Step 2: Operator reads runner field**
 
 ```go
 // MODIFY: /components/operator/internal/handlers/sessions.go
 
 // Add after line 250 (Load config for this session)
 
-// Determine runner image based on workflow type
+// Determine runner image based on parent RFEWorkflow
 runnerImage := getRunnerImageForSession(currentObj, appConfig)
 
 // ...
@@ -944,50 +362,393 @@ Image: runnerImage,
 func getRunnerImageForSession(obj *unstructured.Unstructured, config *config.Config) string {
 	spec, _, _ := unstructured.NestedMap(obj.Object, "spec")
 
-	// Check workflowType field
-	workflowType, _, _ := unstructured.NestedString(spec, "workflowType")
+	// Get parent workflow reference
+	workflowRef, found, _ := unstructured.NestedMap(spec, "workflowRef")
+	if !found {
+		// No workflow ref - default to Claude Code
+		return config.AmbientCodeRunnerImage
+	}
 
-	switch strings.ToLower(workflowType) {
+	// Look up parent RFEWorkflow to get runner field
+	workflowKind, _, _ := unstructured.NestedString(workflowRef, "kind")
+	workflowName, _, _ := unstructured.NestedString(workflowRef, "name")
+
+	if workflowKind != "RFEWorkflow" {
+		// Not an RFE workflow - default to Claude Code
+		return config.AmbientCodeRunnerImage
+	}
+
+	// Fetch RFEWorkflow CR
+	ctx := context.Background()
+	rfeWorkflow := &unstructured.Unstructured{}
+	rfeWorkflow.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "vteam.ambient-code",
+		Version: "v1alpha1",
+		Kind:    "RFEWorkflow",
+	})
+
+	err := client.Get(ctx, types.NamespacedName{
+		Name:      workflowName,
+		Namespace: obj.GetNamespace(),
+	}, rfeWorkflow)
+
+	if err != nil {
+		log.Printf("⚠️ Failed to fetch RFEWorkflow %s: %v, defaulting to Claude runner", workflowName, err)
+		return config.AmbientCodeRunnerImage
+	}
+
+	// Read runner field from RFEWorkflow
+	rfeSpec, _, _ := unstructured.NestedMap(rfeWorkflow.Object, "spec")
+	runner, _, _ := unstructured.NestedString(rfeSpec, "runner")
+
+	switch strings.ToLower(runner) {
 	case "langgraph":
 		if config.LangGraphRunnerImage == "" {
 			log.Printf("⚠️ LangGraph runner image not configured, falling back to Claude runner")
 			return config.AmbientCodeRunnerImage
 		}
+		log.Printf("✅ Using LangGraph runner for RFEWorkflow %s", workflowName)
 		return config.LangGraphRunnerImage
 
-	case "rfe", "":
-		// Default to RFE/Claude runner for backward compatibility
+	case "claude-code", "":
+		// Default to Claude Code runner
+		log.Printf("✅ Using Claude Code runner for RFEWorkflow %s", workflowName)
 		return config.AmbientCodeRunnerImage
 
 	default:
-		log.Printf("⚠️ Unknown workflow type '%s', using Claude runner", workflowType)
+		log.Printf("⚠️ Unknown runner '%s' in RFEWorkflow %s, using Claude runner", runner, workflowName)
 		return config.AmbientCodeRunnerImage
 	}
 }
 ```
 
+**Step 3: Configure LangGraph runner image**
+
+```go
+// MODIFY: /components/operator/internal/config/config.go
+
+type Config struct {
+	// ... existing fields
+	AmbientCodeRunnerImage string  // Existing: Claude Code runner
+	LangGraphRunnerImage   string  // NEW: LangGraph runner
+}
+
+func LoadConfig() *Config {
+	return &Config{
+		// ... existing config
+		AmbientCodeRunnerImage: os.Getenv("AMBIENT_CODE_RUNNER_IMAGE"),
+		LangGraphRunnerImage:   os.Getenv("LANGGRAPH_RUNNER_IMAGE"),
+	}
+}
+```
+
+**Step 4: Environment variables**
+
+```yaml
+# Operator deployment manifest
+env:
+  - name: AMBIENT_CODE_RUNNER_IMAGE
+    value: quay.io/ambient-code/claude-runner:latest
+  - name: LANGGRAPH_RUNNER_IMAGE
+    value: quay.io/ambient-code/langgraph-runner:latest
+```
+
+---
+
+## 4. State Management Patterns
+
+### Checkpoint Storage Location
+
+```bash
+# PVC structure for RFE sessions
+/workspace/sessions/
+  {session-id}/
+    workspace/          # Git repos + RFE outputs
+      spec.md
+      plan.md
+      tasks.md
+      .specify/
+        templates/
+          spec-template.md
+          plan-template.md
+          tasks-template.md
+    .langgraph/         # Checkpoints (LangGraph runner only)
+      checkpoints.db    # SQLite database
+    .claude/            # Claude SDK state (Claude Code runner)
+```
+
+### Session Continuation Pattern
+
+**Claude Code Pattern (current):**
+```python
+# From wrapper.py:219-228
+if is_continuation and parent_session_id:
+    sdk_resume_id = await self._get_sdk_session_id(parent_session_id)
+    if sdk_resume_id:
+        options.resume = sdk_resume_id
+        options.fork_session = False
+```
+
+**LangGraph Pattern (new):**
+```python
+async def _resume_from_checkpoint(self, parent_session_id: str):
+    """
+    Resume RFE workflow from parent's checkpoint:
+    1. Read parent's thread_id from CR annotation
+    2. Load checkpoint from shared PVC path
+    3. Resume graph execution from last completed node
+    """
+    parent_thread_id = await self._get_thread_id_from_annotation(parent_session_id)
+
+    # Checkpointer reads from /workspace/sessions/{parent}/.langgraph/
+    checkpoint = await self.checkpointer.aget(
+        config={"configurable": {"thread_id": parent_thread_id}}
+    )
+
+    if checkpoint:
+        return parent_thread_id  # Use same thread for continuation
+    else:
+        raise RuntimeError(f"No checkpoint found for {parent_session_id}")
+```
+
+---
+
+## 5. Technical Risks & Mitigation
+
+### Risk 1: Output Quality Divergence
+
+**Problem:** LangGraph runner outputs might differ in quality or structure from Claude Code runner.
+
+**Mitigation:**
+- **Automated testing:** Check for required sections (Overview, Goals, etc.)
+- **Manual validation:** Review 10+ sample outputs side-by-side
+- **SpecKit team review:** Validate template loading and prompt conversion
+- **Regression prevention:** Lock in test cases for output structure
+
+### Risk 2: SpecKit Template Compatibility
+
+**Problem:** Template parsing or prompt conversion might differ between runners.
+
+**Mitigation:**
+- **Reuse SpecKit logic:** Use same template parsing where possible
+- **Test all templates:** Validate spec-template.md, plan-template.md, tasks-template.md
+- **Claude API consistency:** Ensure both runners use identical API parameters
+- **Template evolution:** Coordinate with SpecKit team on template format changes
+
+### Risk 3: Checkpoint Storage Growth
+
+**Problem:** Checkpoints accumulate over time, filling PVC.
+
+**Mitigation:**
+- **Automatic pruning:** Keep only last 10 checkpoints per thread
+- **Monitoring:** PVC usage metrics and alerts
+- **Documentation:** Clear guidance on checkpoint lifecycle
+- **Future scaling:** Add Postgres checkpointer option for high-volume deployments
+
+### Risk 4: Backward Compatibility
+
+**Problem:** Existing RFE workflows must continue to work without modification.
+
+**Mitigation:**
+- **Default value:** `runner: claude-code` is default in CRD schema
+- **Testing:** Run 50+ existing RFE workflows, verify no behavior changes
+- **Gradual rollout:** Deploy LangGraph runner as opt-in initially
+- **Version annotation:** Track runner type in session CR for troubleshooting
+
+---
+
+## 6. Implementation Phases
+
+### Phase 1: Foundation (Week 1)
+
+1. **CRD changes**
+   - Add `runner` field to RFEWorkflow CRD
+   - Set default value to `claude-code`
+   - Update API validation
+
+2. **Operator changes**
+   - Add `getRunnerImageForSession()` function
+   - Add `LANGGRAPH_RUNNER_IMAGE` config
+   - Test with mock runner field values
+
+3. **LangGraph adapter skeleton**
+   - Create adapter.py with runner-shell interface
+   - Basic message exchange (no graph execution yet)
+   - Build container image
+
+**Success criteria:** Can create RFEWorkflow with `runner: langgraph` and operator launches LangGraph container.
+
+### Phase 2: RFE Workflow Implementation (Week 2)
+
+1. **SpecKit integration**
+   - Implement SpecKitTemplateLoader
+   - Test template loading from `.specify/templates/`
+   - Validate template parsing
+
+2. **RFE graph**
+   - Build specify → plan → tasks graph
+   - Implement each node with Claude API calls
+   - Write spec.md, plan.md, tasks.md files
+
+3. **Checkpoint persistence**
+   - Set up SQLite checkpointer
+   - Test checkpoint save/load
+   - Implement automatic pruning
+
+4. **Session continuation**
+   - Load checkpoint from parent session
+   - Resume from last completed node
+   - Verify workspace state preserved
+
+**Success criteria:** RFE workflow executes successfully on LangGraph runner, outputs match Claude Code quality.
+
+### Phase 3: Testing & Validation (Week 3)
+
+1. **Output equivalence**
+   - Automated structural validation
+   - Manual quality review (10+ samples)
+   - Side-by-side comparison
+
+2. **Backward compatibility**
+   - Run 50+ existing RFE workflows
+   - Verify default behavior unchanged
+   - Test with and without runner field
+
+3. **Performance benchmarking**
+   - Measure execution time vs Claude Code
+   - Checkpoint I/O latency
+   - PVC usage patterns
+
+4. **Documentation**
+   - User guide for runner selection
+   - Operations guide for troubleshooting
+   - API documentation updates
+
+**Success criteria:** 100% backward compatibility, output equivalence validated, documentation published.
+
+---
+
+## 7. File Structure
+
+```
+vTeam/
+├── components/
+│   ├── runners/
+│   │   ├── runner-shell/          # Unchanged
+│   │   │   └── runner_shell/
+│   │   │       ├── protocol.py
+│   │   │       ├── transport_ws.py
+│   │   │       └── shell.py
+│   │   ├── claude-code-runner/    # Unchanged
+│   │   │   ├── wrapper.py
+│   │   │   └── Dockerfile
+│   │   └── langgraph-runner/      # NEW
+│   │       ├── adapter.py         # LangGraph adapter
+│   │       ├── rfe_graph.py       # RFE workflow graph
+│   │       ├── template_loader.py # SpecKit template parser
+│   │       ├── checkpointer.py    # Checkpoint management
+│   │       ├── streaming.py       # Output streaming
+│   │       ├── observability.py   # Metrics tracking
+│   │       ├── Dockerfile
+│   │       └── requirements.txt
+│   ├── backend/
+│   │   ├── handlers/
+│   │   │   ├── rfe.go             # MODIFY: accept runner field
+│   │   │   └── sessions.go        # Unchanged
+│   │   └── types/
+│   │       └── rfe.go             # MODIFY: add runner field
+│   ├── operator/
+│   │   └── internal/
+│   │       ├── config/
+│   │       │   └── config.go      # MODIFY: add LangGraphRunnerImage
+│   │       └── handlers/
+│   │           └── sessions.go    # MODIFY: add getRunnerImageForSession()
+│   └── manifests/
+│       └── crds/
+│           ├── rfeworkflows-crd.yaml    # MODIFY: add runner field
+│           └── agenticsessions-crd.yaml # Unchanged
+```
+
+---
+
+## 8. Open Questions for Discussion
+
+1. **Template Parsing Strategy**: Should LangGraph runner parse SpecKit templates directly or subprocess to spec-kit CLI?
+   - *Recommendation*: Parse directly for performance, maintain compatibility with SpecKit team
+
+2. **Checkpoint Pruning Policy**: Keep last N checkpoints per session - what is appropriate N value?
+   - *Recommendation*: Keep last 10 checkpoints; configurable via environment variable
+
+3. **Default Runner Value**: Is explicit default (`claude-code`) in CRD schema sufficient?
+   - *Recommendation*: Yes, explicit default clearer for users
+
+4. **Postgres Checkpointer**: Should we support Postgres from MVP or post-MVP?
+   - *Recommendation*: SQLite for MVP, Postgres as optional upgrade for high scale
+
+5. **Output Validation**: How do we validate that LangGraph outputs are equivalent to Claude Code outputs?
+   - *Recommendation*: Automated structure checks + manual quality review of 10+ samples
+
+---
+
+## 9. Recommendations Summary
+
+### Must Have (MVP)
+
+1. ✅ **Single CRD field** - Add `runner` to RFEWorkflow (enum: claude-code, langgraph)
+2. ✅ **Operator image selection** - Dynamic runner image based on runner field
+3. ✅ **Separate container images** - Avoid dependency conflicts
+4. ✅ **SpecKit integration** - Load templates, produce identical outputs
+5. ✅ **Checkpoint persistence** - SQLite with automatic pruning
+6. ✅ **Session continuation** - Resume from parent checkpoint
+7. ✅ **Backward compatibility** - Default to claude-code, existing workflows unchanged
+
+### Should Have (Post-MVP)
+
+1. ⚠️ **Postgres checkpointer** - Better performance for large state
+2. ⚠️ **Frontend runner selection UI** - Dropdown for runner choice
+3. ⚠️ **Advanced observability** - Prometheus metrics, node timing
+4. ⚠️ **Checkpoint management tools** - CLI for inspecting/pruning checkpoints
+
+### Nice to Have (Future)
+
+1. 💡 **Human-in-the-loop nodes** - Pause for approval between stages
+2. 💡 **Validation nodes** - Check spec/plan quality before proceeding
+3. 💡 **Additional runners** - If use cases emerge (CrewAI, custom runners)
+
 ---
 
 ## Conclusion
 
-The vTeam architecture is well-positioned for multi-runner support. The runner-shell abstraction provides clean separation between execution engines and platform infrastructure. The main implementation effort is in building the LangGraph adapter, managing state checkpoints, and extending the operator to select runner images based on workflow type.
+The vTeam architecture is well-positioned for runner choice. The runner-shell abstraction provides clean separation between execution engines and platform infrastructure. The main implementation effort is:
 
-**Estimated effort:** 6-8 weeks for MVP with core functionality.
+1. Adding single `runner` field to RFEWorkflow CRD (20 lines YAML)
+2. Operator image selection logic (50 lines Go)
+3. LangGraph runner implementation (500 lines Python)
+4. SpecKit template integration (100 lines Python)
+5. Testing and validation
+
+**Estimated effort:** 2-3 weeks for MVP with full RFE workflow support.
 
 **Key success factors:**
 1. Keep runner-shell interface stable
 2. Use separate container images to avoid dependency conflicts
-3. Leverage PVC for all state persistence (checkpoints, workspaces)
-4. Start with CRD-per-workflow pattern for type safety
-5. Ensure backward compatibility with existing RFE workflows
+3. Ensure SpecKit template compatibility
+4. Validate output equivalence rigorously
+5. Maintain 100% backward compatibility
 
-This design allows incremental rollout - we can deploy LangGraph runner as opt-in while keeping RFE workflows unchanged. The architecture supports adding more runner types in the future (e.g., CrewAI, AutoGPT) without major refactoring.
+This design allows incremental rollout - we can deploy LangGraph runner as opt-in while keeping existing RFE workflows unchanged. The architecture supports adding more runner types in the future without major refactoring.
 
 ---
 
 **Next Steps:**
 1. Review with architecture team
-2. Create detailed RFE document for stakeholders
-3. Prototype LangGraph adapter in sandbox environment
-4. Performance testing: checkpoint I/O, concurrent sessions
-5. Security review: graph definition execution sandboxing
+2. SpecKit integration review with SpecKit team
+3. Prototype Phase 1 in sandbox environment
+4. Performance testing: checkpoint I/O, output equivalence
+5. Security review if needed
+
+---
+
+**Prepared by:** Stella (Staff Engineer)
+**Contact:** stella@ambient-code.io
+**Date:** 2025-11-04
