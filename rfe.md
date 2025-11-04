@@ -25,9 +25,10 @@ Enable the Ambient Agentic Runner platform (vTeam) to support multiple AI execut
 
 * **ANY modifications to the existing Claude Code runner implementation** - the Claude Code runner remains completely untouched
 * Support for runner types other than Claude Code and LangGraph in this initial implementation (but architecture should be extensible)
+* **Mixed runner usage within the same project/workspace** - once a project chooses a runner type, all sessions in that project/workspace use the same runner
 * Migration tools to convert Claude Code sessions to LangGraph sessions or vice versa
 * Cross-runner session continuation (cannot start with Claude Code and resume with LangGraph)
-* Real-time switching between runners within a single session
+* Real-time switching between runners within a single session or project
 * Support for LangGraph Studio or other third-party LangGraph development tools
 * Custom LangGraph graph definitions uploaded by users (initial implementation will use predefined graphs aligned with RFE Workflow phases)
 * LangGraph Cloud integration or hosted LangGraph services
@@ -159,23 +160,23 @@ The feature is considered complete when:
    - Produces rfe.md, spec.md, plan.md, tasks.md
 9. User continues through workflow phases using Claude Code runner with zero differences from current behavior
 
-**Use Case 3: Mixed Runner Usage in Same RFE Workflow**
+**Use Case 3: Different Runner Choices Across Projects**
 
-*Scenario:* A team wants to use different runners for different phases of the same RFE Workflow.
+*Scenario:* A team uses different runners for different projects based on project characteristics.
 
-1. User creates RFE Workflow for "Add Export Feature"
-2. User runs Ideate phase with **Claude Code runner** (interactive ideation session)
-   - Produces `specs/ambient-export-feature/rfe.md`
-3. User runs Specify phase with **LangGraph runner** (automated specification generation)
-   - Reads rfe.md
-   - Produces `specs/ambient-export-feature/spec.md`
-4. User runs Plan phase with **LangGraph runner** (structured planning workflow)
-   - Reads spec.md
-   - Produces `specs/ambient-export-feature/plan.md`
-5. User runs Tasks phase with **Claude Code runner** (wants interactive task refinement)
-   - Reads plan.md
-   - Produces `specs/ambient-export-feature/tasks.md`
-6. Both runners produce artifacts in identical formats and locations, enabling seamless workflow progression regardless of runner choice
+1. **Project A: Authentication Feature (Claude Code Runner)**
+   - User creates RFE Workflow in Project A workspace: `https://github.com/org/auth-specs`
+   - All sessions in this project use Claude Code runner
+   - User progresses through Ideate → Specify → Plan → Tasks phases with Claude Code
+   - Produces: `specs/ambient-auth-feature/rfe.md`, `spec.md`, `plan.md`, `tasks.md`
+
+2. **Project B: Analytics Pipeline (LangGraph Runner)**
+   - User creates separate RFE Workflow in Project B workspace: `https://github.com/org/analytics-specs`
+   - All sessions in this project use LangGraph runner
+   - User progresses through Ideate → Specify → Plan → Tasks phases with LangGraph
+   - Produces: `specs/ambient-analytics-pipeline/rfe.md`, `spec.md`, `plan.md`, `tasks.md`
+
+3. Both projects use the same RFE Workflow structure and produce compatible artifacts, but each project/workspace consistently uses one runner type throughout all phases
 
 **Use Case 4: Session Continuation (Post-MVP)**
 
@@ -310,7 +311,7 @@ The Ambient Agentic Runner platform currently provides a single execution model:
 - RFE Workflow phases are already supported by the existing LangGraph-based Runnable Agent, providing immediate compatibility
 - The LangGraph runner will leverage the same seeded repository structure (.claude/, .specify/, specs/) as Claude Code runner
 - Future runners (CrewAI, AutoGen) could follow the same pattern established by this LangGraph implementation
-- Both runners can coexist in the same RFE Workflow, allowing teams to choose per-phase which execution model works best
+- Teams can choose which runner type best fits each project's needs, with consistent RFE Workflow artifacts across all runner types
 
 **Customer Considerations:**
 
@@ -346,12 +347,13 @@ The Ambient Agentic Runner platform currently provides a single execution model:
 
 **Organizational Adoption:**
 - Some teams may prefer Claude Code while others prefer LangGraph
-- Consider project-level or user-level runner preferences/defaults
-- Enable teams to standardize on one runner for consistency, or allow mixed usage
+- Runner selection is made at the project/workspace level - all sessions within a project use the same runner
+- Consider project-level runner preferences/defaults to simplify session creation
+- Enable teams to standardize on one runner type per project for consistency
 
 **Backward Compatibility:**
 - **CRITICAL: Zero changes to Claude Code runner implementation** - all existing code, configuration, and behavior remains identical
 - Existing Claude Code sessions must continue working unchanged
 - API clients that don't specify `runnerType` should get Claude Code (current behavior)
-- RFE Workflow artifacts produced by either runner must be interchangeable (a workflow can start with Claude Code and continue with LangGraph or vice versa)
+- RFE Workflow artifacts produced by either runner follow the same schema and structure (enabling consistent tooling and validation across runner types)
 - Ensure versioning strategy allows runner-specific feature rollouts without breaking changes
