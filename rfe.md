@@ -2,14 +2,16 @@
 
 **Feature Overview:**
 
-Enable the Ambient Agentic Runner platform (vTeam) to support multiple AI execution frameworks by adding a LangGraph runner option alongside the existing Claude Code with SpecKit runner. This enhancement allows users to choose between Claude Code's interactive development environment or LangGraph's workflow orchestration capabilities when creating agentic sessions, expanding the platform's versatility to support different use cases ranging from interactive coding assistance to complex multi-agent workflow automation.
+Enable the Ambient Agentic Runner platform (vTeam) to support multiple AI execution frameworks by adding a LangGraph runner option alongside the existing Claude Code with SpecKit runner. This enhancement provides an alternative execution path for agentic sessions without modifying the current Claude Code runner in any way. The LangGraph runner will support the same RFE Workflow phases (Ideate, Specify, Plan, Tasks, Implement, Review, Completed) using a LangGraph-based Runnable Agent that follows the same workflow specifications and produces the same artifacts (rfe.md, spec.md, plan.md, tasks.md), allowing users to choose between Claude Code's interactive development environment or LangGraph's graph-based orchestration capabilities based on their specific use case needs.
 
 **Goals:**
 
 * Enable runtime selection between Claude Code and LangGraph execution frameworks when creating agentic sessions
+* Add LangGraph runner as a completely separate implementation path without any modifications to the existing Claude Code runner
 * Maintain full feature parity with the existing Claude Code runner for core capabilities (WebSocket streaming, multi-repo support, session continuation, Git integration)
+* Support the existing RFE Workflow phases using a LangGraph-based Runnable Agent that produces the same workflow artifacts (rfe.md, spec.md, plan.md, tasks.md)
 * Provide a clean abstraction layer that makes adding future runner types straightforward
-* Ensure existing Claude Code sessions and workflows continue to work without modification
+* Ensure existing Claude Code sessions and workflows continue to work without any modification
 * Allow users to leverage LangGraph's strengths in workflow orchestration, state management, and complex multi-agent coordination
 * Support projects that benefit from LangGraph's graph-based execution model with explicit state transitions and control flow
 
@@ -21,13 +23,13 @@ Enable the Ambient Agentic Runner platform (vTeam) to support multiple AI execut
 
 **Out of Scope:**
 
-* Complete rewrite or refactoring of the existing Claude Code runner implementation
+* **ANY modifications to the existing Claude Code runner implementation** - the Claude Code runner remains completely untouched
 * Support for runner types other than Claude Code and LangGraph in this initial implementation (but architecture should be extensible)
 * Migration tools to convert Claude Code sessions to LangGraph sessions or vice versa
 * Cross-runner session continuation (cannot start with Claude Code and resume with LangGraph)
 * Real-time switching between runners within a single session
 * Support for LangGraph Studio or other third-party LangGraph development tools
-* Custom LangGraph graph definitions uploaded by users (initial implementation will use predefined graphs)
+* Custom LangGraph graph definitions uploaded by users (initial implementation will use predefined graphs aligned with RFE Workflow phases)
 * LangGraph Cloud integration or hosted LangGraph services
 
 **Requirements:**
@@ -43,16 +45,22 @@ Enable the Ambient Agentic Runner platform (vTeam) to support multiple AI execut
    - Create new `langgraph-runner` component directory following the same structure as `claude-code-runner`
    - Implement `LangGraphAdapter` class conforming to the same interface as `ClaudeCodeAdapter` (`initialize()`, `run()`, `handle_message()`)
    - Support core capabilities: workspace management, Git clone/push, WebSocket streaming, multi-repo support
+   - Integrate existing LangGraph-based Runnable Agent that follows RFE Workflow specifications
+   - Support RFE Workflow phases: Ideate (interactive), Specify, Plan, Tasks, Implement with appropriate graph structures
+   - Produce workflow artifacts compatible with RFE Workflow: rfe.md, spec.md, plan.md, tasks.md in specs/{branchName}/ directory
    - Integrate LangGraph framework with appropriate LLM provider configuration (Anthropic Claude models initially)
 
 3. **Operator Runner Selection** (MVP)
    - Modify operator to select appropriate container image based on `runnerType` in CR spec
    - Support new configuration: `AMBIENT_LANGGRAPH_RUNNER_IMAGE` environment variable
    - Maintain backward compatibility: default to Claude Code if `runnerType` not specified
+   - Ensure operator changes do not affect Claude Code runner job creation logic in any way
 
-4. **Basic LangGraph Workflow** (MVP)
-   - Implement a simple predefined LangGraph graph for initial release (e.g., linear workflow: analyze → plan → implement)
-   - Support prompt execution through LangGraph state machine
+4. **RFE Workflow Support via LangGraph** (MVP)
+   - Integrate existing LangGraph-based Runnable Agent that implements RFE Workflow phases
+   - Support phase-appropriate graph execution: interactive for Ideate, automated for Specify/Plan/Tasks
+   - Ensure LangGraph runner produces artifacts in the same locations and formats as Claude Code runner (specs/{branchName}/rfe.md, spec.md, plan.md, tasks.md)
+   - Support prompt execution through LangGraph state machine with workflow phase awareness
    - Capture and stream LangGraph execution logs and agent outputs to WebSocket
 
 5. **Documentation** (MVP)
@@ -72,13 +80,15 @@ Enable the Ambient Agentic Runner platform (vTeam) to support multiple AI execut
    - Enable LangGraph's human-in-the-loop capabilities for interactive sessions
    - Implement LangGraph's streaming and callback mechanisms for fine-grained progress updates
 
-8. **SpecKit Integration for LangGraph** (Post-MVP)
-   - Adapt SpecKit workflow commands (`/speckit.plan`, `/speckit.implement`) to work with LangGraph runner
-   - Create LangGraph graph definitions optimized for SpecKit phased workflows
+8. **Enhanced RFE Workflow Integration** (Post-MVP)
+   - Support workflow phase transitions and validations within LangGraph graphs
+   - Implement prerequisite checking (spec.md for Plan phase, plan.md for Tasks phase, etc.)
+   - Create LangGraph graph definitions optimized for each RFE Workflow phase
 
 9. **Multi-Agent Graph Support** (Post-MVP)
    - Leverage vTeam's existing agent personas (Emma, Stella, Ryan, etc.) as LangGraph nodes
    - Create graph templates for common multi-agent collaboration patterns
+   - Support agent selection configurations (BALANCED, COMPREHENSIVE) within LangGraph execution
 
 10. **Runner Performance Metrics** (Post-MVP)
     - Track and expose metrics per runner type (execution time, token usage, success rate)
@@ -92,10 +102,11 @@ The feature is considered complete when:
 2. **LangGraph Sessions Execute:** A session created with `runnerType: langgraph` successfully:
    - Clones the specified repository(ies) to workspace
    - Executes the provided prompt through a LangGraph workflow
+   - Produces RFE Workflow artifacts (rfe.md, spec.md, plan.md, tasks.md) in the same format and location as Claude Code runner
    - Streams execution updates to the WebSocket
    - Commits and pushes results to the output repository
    - Updates the CR status with completion/failure state
-3. **Claude Code Sessions Unaffected:** Existing Claude Code sessions and new sessions with `runnerType: claude-code` (or default/omitted) continue to work exactly as before
+3. **Claude Code Runner Completely Unaffected:** The Claude Code runner code, configuration, and behavior remains 100% unchanged. Existing Claude Code sessions and new sessions with `runnerType: claude-code` (or default/omitted) continue to work exactly as before with zero modifications to the claude-code-runner implementation
 4. **Multi-Repo Support:** LangGraph runner successfully handles multi-repo configurations via `REPOS_JSON` environment variable
 5. **Error Handling:** LangGraph runner gracefully handles common errors (authentication failures, missing repos, LangGraph execution errors) and reports them via WebSocket and CR status
 6. **Documentation Complete:** A developer can read the documentation and understand:
@@ -106,61 +117,65 @@ The feature is considered complete when:
 
 **Use Cases - i.e. User Experience & Workflow:**
 
-**Use Case 1: Data Scientist Creates LangGraph Workflow Session**
+**Use Case 1: RFE Workflow with LangGraph Runner**
 
-*Scenario:* A data scientist wants to use LangGraph's workflow capabilities to orchestrate a data analysis pipeline.
+*Scenario:* A product team wants to use LangGraph's structured workflow capabilities to manage an RFE Workflow from ideation through task breakdown.
 
-1. User navigates to "Create Session" page in vTeam UI
-2. User selects "LangGraph" from the "Runner Type" dropdown
-3. User specifies:
-   - Prompt: "Analyze the sales data in data/sales.csv and generate a summary report"
-   - Repository: `https://github.com/org/data-analysis-repo`
-   - Output branch: `analysis-results`
-4. User clicks "Start Session"
-5. Backend creates `AgenticSession` CR with `spec.runnerType: langgraph`
-6. Operator provisions Job with LangGraph runner image
-7. LangGraph runner:
-   - Clones repository
-   - Executes predefined analysis graph (nodes: load_data → analyze → generate_report)
-   - Streams progress updates to UI via WebSocket
-   - Commits report.md to output branch
-8. User views results in UI and navigates to GitHub to see the PR
+1. User creates an RFE Workflow in vTeam UI with umbrella repo: `https://github.com/org/specs-repo`
+2. System seeds the repository with .claude/, .specify/, and specs/{branchName}/ directories
+3. User starts "Ideate" phase session:
+   - Selects "LangGraph" from "Runner Type" dropdown
+   - Interactive mode: true
+   - Prompt: "Create an RFE for adding real-time metrics to the dashboard"
+4. Backend creates `AgenticSession` CR with `spec.runnerType: langgraph` and labels `rfe-phase: ideate`
+5. Operator provisions Job with LangGraph runner image
+6. LangGraph runner executes interactive graph:
+   - Clones umbrella repo to workspace
+   - Runs LangGraph-based Runnable Agent in interactive mode
+   - Produces `specs/ambient-metrics-dashboard/rfe.md`
+   - Commits and pushes to feature branch
+7. User starts "Specify" phase session with LangGraph runner (automated):
+   - Reads rfe.md from workspace
+   - Executes LangGraph Specify graph
+   - Produces `specs/ambient-metrics-dashboard/spec.md`
+8. User continues through Plan and Tasks phases using LangGraph runner, each producing the expected artifacts
 
-**Use Case 2: Developer Uses Claude Code for Interactive Development**
+**Use Case 2: Developer Uses Claude Code Runner (No Changes)**
 
-*Scenario:* A developer wants to use Claude Code's interactive capabilities for iterative feature development.
+*Scenario:* A developer wants to use Claude Code's interactive capabilities for the same RFE Workflow.
 
-1. User navigates to "Create Session" page
-2. User selects "Claude Code" from "Runner Type" dropdown (or leaves as default)
-3. User specifies:
-   - Prompt: "/speckit.implement"
-   - Repository: `https://github.com/org/feature-repo`
+1. User navigates to existing RFE Workflow
+2. User starts "Ideate" phase session
+3. User selects "Claude Code" from "Runner Type" dropdown (or leaves as default)
+4. User specifies:
+   - Prompt: "Create an RFE for adding authentication features"
    - Interactive: `true`
-4. User clicks "Start Session"
-5. Backend creates `AgenticSession` CR with `spec.runnerType: claude-code` (or omitted)
-6. Operator provisions Job with Claude Code runner image
-7. Claude Code runner executes as it does today, supporting interactive back-and-forth
-8. User can continue session and provide follow-up prompts
+5. User clicks "Start Session"
+6. Backend creates `AgenticSession` CR with `spec.runnerType: claude-code` (or omitted)
+7. Operator provisions Job with Claude Code runner image **using existing unchanged implementation**
+8. Claude Code runner executes exactly as it does today:
+   - Uses /speckit commands or interactive prompts
+   - Supports SpecKit workflow phases
+   - Produces rfe.md, spec.md, plan.md, tasks.md
+9. User continues through workflow phases using Claude Code runner with zero differences from current behavior
 
-**Use Case 3: API-Driven Session Creation with Runner Selection**
+**Use Case 3: Mixed Runner Usage in Same RFE Workflow**
 
-*Scenario:* An external CI/CD system creates agentic sessions programmatically.
+*Scenario:* A team wants to use different runners for different phases of the same RFE Workflow.
 
-```bash
-# Create LangGraph session via API
-curl -X POST https://vteam.example.com/api/projects/my-project/agentic-sessions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "runnerType": "langgraph",
-    "prompt": "Run regression tests and generate report",
-    "repos": [{
-      "input": {"url": "https://github.com/org/repo", "branch": "main"},
-      "output": {"url": "https://github.com/org/repo", "branch": "test-results"}
-    }],
-    "interactive": false,
-    "llmSettings": {"model": "claude-3-5-sonnet-20241022"}
-  }'
-```
+1. User creates RFE Workflow for "Add Export Feature"
+2. User runs Ideate phase with **Claude Code runner** (interactive ideation session)
+   - Produces `specs/ambient-export-feature/rfe.md`
+3. User runs Specify phase with **LangGraph runner** (automated specification generation)
+   - Reads rfe.md
+   - Produces `specs/ambient-export-feature/spec.md`
+4. User runs Plan phase with **LangGraph runner** (structured planning workflow)
+   - Reads spec.md
+   - Produces `specs/ambient-export-feature/plan.md`
+5. User runs Tasks phase with **Claude Code runner** (wants interactive task refinement)
+   - Reads plan.md
+   - Produces `specs/ambient-export-feature/tasks.md`
+6. Both runners produce artifacts in identical formats and locations, enabling seamless workflow progression regardless of runner choice
 
 **Use Case 4: Session Continuation (Post-MVP)**
 
@@ -216,10 +231,11 @@ curl -X POST https://vteam.example.com/api/projects/my-project/agentic-sessions 
 
 **Questions to answer:**
 
-1. **LangGraph Graph Design:**
-   - What should the initial predefined LangGraph graph look like? (Linear analyze→plan→implement, or more complex?)
-   - Should we support LangGraph's ReAct agent pattern, plan-and-execute pattern, or custom patterns?
-   - How do we map the current prompt-based interface to LangGraph's state-based execution model?
+1. **LangGraph Integration Details:**
+   - How is the existing LangGraph-based Runnable Agent structured to support RFE Workflow phases?
+   - What are the specific inputs and outputs expected by the LangGraph agent for each phase (Ideate, Specify, Plan, Tasks)?
+   - How does the LangGraph agent handle the transition between interactive (Ideate) and automated (Specify/Plan/Tasks) modes?
+   - What dependencies or environment configuration does the LangGraph agent require?
 
 2. **State Management:**
    - Where should LangGraph checkpoint data be stored? (In PVC alongside workspace, or separate volume?)
@@ -245,10 +261,11 @@ curl -X POST https://vteam.example.com/api/projects/my-project/agentic-sessions 
    - How should interactive mode work with LangGraph? (Pause at certain nodes? Human-in-the-loop?)
    - Should LangGraph support the same WebSocket message protocol for user input during execution?
 
-7. **SpecKit Compatibility:**
-   - Should LangGraph runner attempt to support SpecKit commands (`/speckit.plan`, etc.) in MVP?
-   - If yes, how do we validate prerequisites and enforce phased execution in a graph-based model?
-   - Should we create LangGraph-specific workflow commands (e.g., `/langgraph.analyze`, `/langgraph.workflow`)?
+7. **RFE Workflow Artifact Compatibility:**
+   - How do we ensure LangGraph runner produces artifacts (rfe.md, spec.md, plan.md, tasks.md) with the exact same schema and structure as Claude Code runner?
+   - Should LangGraph runner validate artifact format against templates/schemas before committing?
+   - How do we handle prerequisite validation (spec.md exists before Plan, plan.md exists before Tasks) in LangGraph runner?
+   - Should the LangGraph runner expose the same phase-based environment variables (WORKFLOW_PHASE, PARENT_RFE) as Claude Code runner?
 
 8. **Error Handling and Observability:**
    - How do we capture and report LangGraph-specific errors (node failures, state validation errors)?
@@ -290,8 +307,10 @@ The Ambient Agentic Runner platform currently provides a single execution model:
 
 **Related Initiatives:**
 - vTeam agent personas (Emma, Stella, Ryan, etc.) could be represented as LangGraph nodes in future iterations
-- SpecKit workflows may benefit from LangGraph's structured execution model in complex multi-phase scenarios
+- RFE Workflow phases are already supported by the existing LangGraph-based Runnable Agent, providing immediate compatibility
+- The LangGraph runner will leverage the same seeded repository structure (.claude/, .specify/, specs/) as Claude Code runner
 - Future runners (CrewAI, AutoGen) could follow the same pattern established by this LangGraph implementation
+- Both runners can coexist in the same RFE Workflow, allowing teams to choose per-phase which execution model works best
 
 **Customer Considerations:**
 
@@ -331,6 +350,8 @@ The Ambient Agentic Runner platform currently provides a single execution model:
 - Enable teams to standardize on one runner for consistency, or allow mixed usage
 
 **Backward Compatibility:**
+- **CRITICAL: Zero changes to Claude Code runner implementation** - all existing code, configuration, and behavior remains identical
 - Existing Claude Code sessions must continue working unchanged
 - API clients that don't specify `runnerType` should get Claude Code (current behavior)
+- RFE Workflow artifacts produced by either runner must be interchangeable (a workflow can start with Claude Code and continue with LangGraph or vice versa)
 - Ensure versioning strategy allows runner-specific feature rollouts without breaking changes
