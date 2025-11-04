@@ -1,0 +1,443 @@
+# WebSocket Protocol Contract: Runner to Backend Communication
+
+protocol: WebSocket
+version: 1.0.0
+description: |
+  Bidirectional WebSocket protocol for real-time communication between
+  runner containers and backend service. Used for streaming execution
+  progress, agent messages, and user input handling.
+
+connection:
+  url: "ws://{backend-service}:8080/api/projects/{project}/sessions/{session}/ws"
+  authentication:
+    type: Bearer
+    header: "Authorization: Bearer {BOT_TOKEN}"
+    description: |
+      BOT_TOKEN is Kubernetes service account token injected into runner pod.
+      Provides runner authorization to update session status.
+  protocol: "ws" or "wss"
+  reconnection:
+    enabled: false
+    description: |
+      Runners do not implement reconnection logic. Connection failures
+      result in session failure.
+
+message_format:
+  encoding: JSON
+  structure:
+    seq:
+      type: integer
+      required: true
+      description: "Monotonic sequence number starting from 1"
+    type:
+      type: string
+      required: true
+      enum:
+        - "system.message"
+        - "agent.message"
+        - "user.message"
+        - "message.partial"
+        - "agent.running"
+        - "agent.waiting"
+        - "session.started"
+        - "session.completed"
+        - "session.failed"
+      description: "Message type determining payload structure"
+    timestamp:
+      type: string
+      required: true
+      format: "ISO 8601"
+      example: "2025-11-04T15:30:45.123Z"
+      description: "Message creation timestamp"
+    payload:
+      type: object
+      required: true
+      description: "Message-specific payload (structure varies by type)"
+    partial:
+      type: object
+      required: false
+      description: "Partial message metadata (only for message.partial type)"
+      properties:
+        id:
+          type: string
+          description: "Unique identifier for fragment set"
+        index:
+          type: integer
+          description: "Fragment index (0-based)"
+        total:
+          type: integer
+          description: "Total fragments in set"
+        data:
+          type: string
+          description: "Fragment data"
+
+message_types:
+  system.message:
+    direction: runner → backend
+    description: "System logs, diagnostics, and informational messages"
+    payload_schema:
+      type: object
+      required:
+        - level
+        - message
+      properties:
+        level:
+          type: string
+          enum: ["debug", "info", "warn", "error"]
+          description: "Log level"
+        message:
+          type: string
+          description: "Log message content"
+        context:
+          type: object
+          description: "Additional context (optional)"
+          additionalProperties: true
+    example:
+      seq: 1
+      type: "system.message"
+      timestamp: "2025-11-04T15:30:45.123Z"
+      payload:
+        level: "info"
+        message: "Initialized LangGraph workflow for ideate phase"
+        context:
+          phase: "ideate"
+          workspace: "/workspace/sessions/test/workspace"
+
+  agent.message:
+    direction: runner → backend
+    description: "Structured agent outputs (tool calls, completions, etc.)"
+    payload_schema:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          description: "Agent message content"
+        metadata:
+          type: object
+          description: "Message metadata (optional)"
+          properties:
+            type:
+              type: string
+              enum: ["tool_use", "tool_result", "text", "phase_complete"]
+              description: "Agent message subtype"
+            toolName:
+              type: string
+              description: "Tool name (for tool_use/tool_result)"
+            phase:
+              type: string
+              description: "RFE phase (for phase_complete)"
+    example:
+      seq: 5
+      type: "agent.message"
+      timestamp: "2025-11-04T15:31:10.456Z"
+      payload:
+        content: "Executing write_file tool to create rfe.md"
+        metadata:
+          type: "tool_use"
+          toolName: "write_file"
+
+  message.partial:
+    direction: runner → backend
+    description: "Large message fragments (e.g., token streaming from LLM)"
+    payload_schema:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          description: "Partial content (empty for continuation)"
+    partial_schema:
+      required: true
+      properties:
+        id:
+          type: string
+          description: "Fragment set identifier (UUID)"
+        index:
+          type: integer
+          description: "Fragment index (0-based)"
+        total:
+          type: integer
+          description: "Total fragments (estimated, may grow)"
+        data:
+          type: string
+          description: "Fragment data (token content)"
+    example:
+      seq: 10
+      type: "message.partial"
+      timestamp: "2025-11-04T15:31:15.789Z"
+      payload:
+        content: ""
+      partial:
+        id: "550e8400-e29b-41d4-a716-446655440000"
+        index: 0
+        total: 10
+        data: "The user authentication system should include"
+
+  agent.running:
+    direction: runner → backend
+    description: "Agent is actively executing (heartbeat)"
+    payload_schema:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: ["running"]
+          description: "Execution status"
+        progress:
+          type: object
+          description: "Progress indicators (optional)"
+          properties:
+            current_node:
+              type: string
+              description: "Current graph node"
+            phase:
+              type: string
+              description: "Current RFE phase"
+    example:
+      seq: 15
+      type: "agent.running"
+      timestamp: "2025-11-04T15:31:20.123Z"
+      payload:
+        status: "running"
+        progress:
+          current_node: "ideate_llm"
+          phase: "ideate"
+
+  agent.waiting:
+    direction: runner → backend
+    description: "Agent is waiting for user input (interactive mode)"
+    payload_schema:
+      type: object
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          description: "Why agent is waiting"
+        prompt:
+          type: string
+          description: "Prompt for user input (optional)"
+    example:
+      seq: 20
+      type: "agent.waiting"
+      timestamp: "2025-11-04T15:32:00.456Z"
+      payload:
+        reason: "User clarification needed"
+        prompt: "Should the authentication support OAuth2 or SAML?"
+
+  user.message:
+    direction: backend → runner
+    description: "User input during interactive sessions"
+    payload_schema:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          description: "User input content"
+    example:
+      seq: 21
+      type: "user.message"
+      timestamp: "2025-11-04T15:32:30.789Z"
+      payload:
+        content: "Use OAuth2 for authentication"
+
+  session.started:
+    direction: runner → backend
+    description: "Session initialization complete, runner starting execution"
+    payload_schema:
+      type: object
+      required:
+        - session_id
+      properties:
+        session_id:
+          type: string
+          description: "Session identifier"
+        runnerType:
+          type: string
+          enum: ["claude-code", "langgraph"]
+          description: "Runner type"
+        workspace:
+          type: string
+          description: "Workspace path"
+    example:
+      seq: 1
+      type: "session.started"
+      timestamp: "2025-11-04T15:30:45.000Z"
+      payload:
+        session_id: "agentic-session-1699564832"
+        runnerType: "langgraph"
+        workspace: "/workspace/sessions/agentic-session-1699564832/workspace"
+
+  session.completed:
+    direction: runner → backend
+    description: "Session completed successfully"
+    payload_schema:
+      type: object
+      required:
+        - session_id
+        - artifacts
+      properties:
+        session_id:
+          type: string
+          description: "Session identifier"
+        artifacts:
+          type: array
+          description: "Produced artifacts"
+          items:
+            type: object
+            required:
+              - type
+              - path
+            properties:
+              type:
+                type: string
+                enum: ["rfe.md", "spec.md", "plan.md", "tasks.md"]
+                description: "Artifact type"
+              path:
+                type: string
+                description: "Relative path in repository"
+              commitSHA:
+                type: string
+                pattern: '^[0-9a-f]{40}$'
+                description: "Git commit SHA"
+        duration:
+          type: integer
+          description: "Execution duration in seconds"
+    example:
+      seq: 100
+      type: "session.completed"
+      timestamp: "2025-11-04T15:35:00.123Z"
+      payload:
+        session_id: "agentic-session-1699564832"
+        artifacts:
+          - type: "rfe.md"
+            path: "specs/001-user-auth/rfe.md"
+            commitSHA: "a1b2c3d4e5f6789012345678901234567890abcd"
+        duration: 270
+
+  session.failed:
+    direction: runner → backend
+    description: "Session failed with error"
+    payload_schema:
+      type: object
+      required:
+        - session_id
+        - error
+      properties:
+        session_id:
+          type: string
+          description: "Session identifier"
+        error:
+          type: string
+          description: "Error message"
+        errorType:
+          type: string
+          enum: ["auth_failure", "timeout", "validation_error", "llm_error", "git_error", "unknown"]
+          description: "Error category"
+        context:
+          type: object
+          description: "Additional error context"
+          additionalProperties: true
+    example:
+      seq: 50
+      type: "session.failed"
+      timestamp: "2025-11-04T15:33:00.789Z"
+      payload:
+        session_id: "agentic-session-1699564832"
+        error: "Failed to authenticate with Anthropic API: Invalid API key"
+        errorType: "auth_failure"
+        context:
+          provider: "anthropic"
+          model: "claude-3-7-sonnet-latest"
+
+streaming_behavior:
+  token_streaming:
+    description: |
+      LLM token streaming uses message.partial type with sequential fragments.
+      Frontend must buffer fragments by partial.id and reconstruct full content.
+    flow:
+      - "Runner sends message.partial with index=0, total=estimated"
+      - "Runner sends subsequent fragments with incrementing index"
+      - "Total may grow if estimation was low"
+      - "No explicit end marker - streaming stops when tokens complete"
+    example_sequence:
+      - seq: 10, partial: {id: "uuid", index: 0, total: 5, data: "The user"}
+      - seq: 11, partial: {id: "uuid", index: 1, total: 5, data: " authentication"}
+      - seq: 12, partial: {id: "uuid", index: 2, total: 5, data: " system should"}
+      - seq: 13, partial: {id: "uuid", index: 3, total: 7, data: " include OAuth2"}
+      - seq: 14, partial: {id: "uuid", index: 4, total: 7, data: " and SAML"}
+      - seq: 15, partial: {id: "uuid", index: 5, total: 7, data: " support"}
+      - seq: 16, partial: {id: "uuid", index: 6, total: 7, data: "."}
+
+  agent_progress:
+    description: |
+      Agent progress updates use agent.running type periodically during execution.
+      Recommended frequency: Every 5-10 seconds during long-running operations.
+    flow:
+      - "Runner sends agent.running with progress.current_node"
+      - "Frontend displays current node/phase to user"
+      - "Progress updates do not require acknowledgment"
+
+error_handling:
+  connection_failure:
+    description: "If WebSocket connection fails, runner terminates session"
+    runner_behavior: "Log error, update CR status to Failed, exit"
+    backend_behavior: "Mark session as Failed, notify user"
+
+  message_send_failure:
+    description: "If message send fails (e.g., buffer full), runner retries once"
+    runner_behavior: "Retry once with 1s delay, then fail session if still failing"
+    backend_behavior: "N/A (no ack required)"
+
+  invalid_message:
+    description: "If backend receives malformed message, log and ignore"
+    runner_behavior: "N/A"
+    backend_behavior: "Log warning, continue processing other messages"
+
+performance_requirements:
+  latency:
+    description: "Message delivery latency from runner to backend"
+    target: "<2 seconds (95th percentile)"
+    measurement: "Timestamp in message vs. backend receive timestamp"
+
+  throughput:
+    description: "Message throughput for token streaming"
+    target: ">100 messages/second"
+    measurement: "Messages processed by backend per second"
+
+  buffer_size:
+    description: "WebSocket send/receive buffer size"
+    runner: "1MB send buffer"
+    backend: "1MB receive buffer per connection"
+
+compatibility:
+  langgraph_runner:
+    support: "Full support for all message types"
+    token_streaming: "Yes (via message.partial)"
+    interactive: "Post-MVP (agent.waiting/user.message queued but not processed)"
+
+  claude_code_runner:
+    support: "Full support (existing implementation)"
+    token_streaming: "Yes (via message.partial)"
+    interactive: "Yes (full support)"
+
+validation:
+  message_schema:
+    enforcement: "Backend validates message structure on receive"
+    invalid_message: "Logged and ignored (does not fail session)"
+
+  sequence_numbers:
+    enforcement: "Backend expects monotonic increasing seq"
+    duplicate_seq: "Logged as warning, message processed"
+    missing_seq: "Logged as warning, no impact on processing"
+
+  timestamp_format:
+    enforcement: "Must be valid ISO 8601 format"
+    invalid_timestamp: "Message rejected, logged as error"

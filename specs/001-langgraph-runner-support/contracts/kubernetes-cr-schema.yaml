@@ -1,0 +1,263 @@
+# Kubernetes Custom Resource Schema: AgenticSession
+
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: agenticsessions.vteam.ambient-code
+spec:
+  group: vteam.ambient-code
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+              description: "API version (vteam.ambient-code/v1alpha1)"
+            kind:
+              type: string
+              description: "Resource kind (AgenticSession)"
+            metadata:
+              type: object
+              properties:
+                name:
+                  type: string
+                  pattern: '^agentic-session-[0-9]+$'
+                  description: "Session name (format: agentic-session-{timestamp})"
+                namespace:
+                  type: string
+                  description: "Project namespace"
+                labels:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: "Kubernetes labels"
+                annotations:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: "Kubernetes annotations (includes sdk-session-id for continuation)"
+            spec:
+              type: object
+              required:
+                - prompt
+                - project
+              properties:
+                runnerType:
+                  type: string
+                  enum: ["claude-code", "langgraph"]
+                  default: "claude-code"
+                  description: |
+                    Runner implementation to use for session execution.
+                    - claude-code: Interactive development tool (default)
+                    - langgraph: Structured workflow orchestration
+                  x-kubernetes-immutable: true
+                prompt:
+                  type: string
+                  minLength: 1
+                  maxLength: 10000
+                  description: "User's initial prompt or task description"
+                displayName:
+                  type: string
+                  maxLength: 255
+                  description: "Human-readable session name"
+                project:
+                  type: string
+                  description: "Project identifier (namespace)"
+                llmSettings:
+                  type: object
+                  required:
+                    - model
+                  properties:
+                    model:
+                      type: string
+                      description: "LLM model identifier"
+                      enum:
+                        - "claude-3-7-sonnet-latest"
+                        - "claude-3-5-sonnet-latest"
+                        - "claude-3-opus-latest"
+                    temperature:
+                      type: number
+                      format: float
+                      minimum: 0.0
+                      maximum: 2.0
+                      default: 0.7
+                      description: "LLM temperature"
+                    maxTokens:
+                      type: integer
+                      minimum: 100
+                      maximum: 8000
+                      default: 4000
+                      description: "Maximum tokens for LLM response"
+                timeout:
+                  type: integer
+                  minimum: 60
+                  maximum: 3600
+                  default: 600
+                  description: "Session timeout in seconds"
+                interactive:
+                  type: boolean
+                  default: false
+                  description: "Enable interactive mode"
+                repos:
+                  type: array
+                  description: "Multi-repository configuration"
+                  items:
+                    type: object
+                    required:
+                      - input
+                    properties:
+                      input:
+                        type: object
+                        required:
+                          - url
+                        properties:
+                          url:
+                            type: string
+                            format: uri
+                            description: "Git repository URL"
+                          branch:
+                            type: string
+                            description: "Branch name"
+                      output:
+                        type: object
+                        required:
+                          - url
+                        properties:
+                          url:
+                            type: string
+                            format: uri
+                            description: "Output repository URL"
+                          branch:
+                            type: string
+                            description: "Output branch name"
+                      status:
+                        type: string
+                        description: "Repository clone status (internal)"
+                mainRepoIndex:
+                  type: integer
+                  minimum: 0
+                  default: 0
+                  description: "Index of main working directory repository"
+                autoPushOnComplete:
+                  type: boolean
+                  default: false
+                  description: "Auto-push artifacts on completion"
+                userContext:
+                  type: object
+                  required:
+                    - userId
+                    - displayName
+                    - groups
+                  properties:
+                    userId:
+                      type: string
+                      description: "User identifier"
+                    displayName:
+                      type: string
+                      description: "User display name"
+                    groups:
+                      type: array
+                      items:
+                        type: string
+                      description: "User group memberships"
+                botAccount:
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: "Bot account name (references secret)"
+                resourceOverrides:
+                  type: object
+                  properties:
+                    cpu:
+                      type: string
+                      description: "CPU resource request/limit"
+                    memory:
+                      type: string
+                      description: "Memory resource request/limit"
+                    storageClass:
+                      type: string
+                      description: "Storage class for PVC"
+                    priorityClass:
+                      type: string
+                      description: "Priority class for pod"
+                environmentVariables:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: "Custom environment variables"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: ["Pending", "Creating", "Running", "Completed", "Failed"]
+                  description: "Current session phase"
+                startTime:
+                  type: string
+                  format: date-time
+                  description: "Session start time (ISO 8601)"
+                completionTime:
+                  type: string
+                  format: date-time
+                  description: "Session completion time (ISO 8601)"
+                error:
+                  type: string
+                  description: "Error message if phase == Failed"
+                artifacts:
+                  type: array
+                  description: "Produced artifacts"
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - path
+                    properties:
+                      type:
+                        type: string
+                        enum: ["rfe.md", "spec.md", "plan.md", "tasks.md"]
+                        description: "Artifact type"
+                      path:
+                        type: string
+                        description: "Relative path in repository"
+                      commitSHA:
+                        type: string
+                        pattern: '^[0-9a-f]{40}$'
+                        description: "Git commit SHA"
+                jobName:
+                  type: string
+                  description: "Associated Kubernetes Job name"
+                pvcName:
+                  type: string
+                  description: "Associated PVC name"
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          description: Current session phase
+          jsonPath: .status.phase
+        - name: Runner
+          type: string
+          description: Runner type
+          jsonPath: .spec.runnerType
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+        - name: Project
+          type: string
+          jsonPath: .spec.project
+  scope: Namespaced
+  names:
+    plural: agenticsessions
+    singular: agenticsession
+    kind: AgenticSession
+    shortNames:
+      - as
+      - agsess

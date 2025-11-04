@@ -1,0 +1,397 @@
+# API Contract: CreateAgenticSession
+
+openapi: 3.0.3
+info:
+  title: vTeam Agentic Session API
+  version: 1.1.0
+  description: |
+    API contract for creating agentic sessions with runner type selection support.
+    Version 1.1.0 adds optional `runnerType` parameter for LangGraph runner support.
+
+paths:
+  /api/projects/{project}/sessions:
+    post:
+      summary: Create new agentic session
+      description: |
+        Creates a new agentic session with specified configuration and runner type.
+        The runner type determines which execution framework handles the session:
+        - `claude-code`: Uses Claude Code interactive development tool (default)
+        - `langgraph`: Uses LangGraph workflow orchestration framework
+      operationId: createAgenticSession
+      parameters:
+        - name: project
+          in: path
+          required: true
+          description: Project namespace identifier
+          schema:
+            type: string
+            pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+            example: "my-project"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgenticSessionRequest'
+            examples:
+              langgraph-ideate:
+                summary: LangGraph runner - Ideate phase
+                value:
+                  runnerType: "langgraph"
+                  prompt: "Create an RFE for adding user authentication"
+                  llmSettings:
+                    model: "claude-3-7-sonnet-latest"
+                    temperature: 0.8
+                    maxTokens: 4000
+                  interactive: true
+                  repos:
+                    - input:
+                        url: "https://github.com/example/repo.git"
+                        branch: "main"
+                      output:
+                        url: "https://github.com/example/repo.git"
+                        branch: "001-user-auth"
+              claude-code-default:
+                summary: Claude Code runner (default)
+                value:
+                  prompt: "Help me implement the authentication feature"
+                  llmSettings:
+                    model: "claude-3-7-sonnet-latest"
+                    temperature: 0.7
+                    maxTokens: 4000
+                  repos:
+                    - input:
+                        url: "https://github.com/example/repo.git"
+                        branch: "001-user-auth"
+              langgraph-multi-repo:
+                summary: LangGraph with multi-repo
+                value:
+                  runnerType: "langgraph"
+                  prompt: "Generate implementation plan for API service"
+                  repos:
+                    - input:
+                        url: "https://github.com/example/backend.git"
+                        branch: "main"
+                      output:
+                        url: "https://github.com/example/backend.git"
+                        branch: "002-api-service"
+                    - input:
+                        url: "https://github.com/example/frontend.git"
+                        branch: "main"
+                  mainRepoIndex: 0
+      responses:
+        '201':
+          description: Session created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateSessionResponse'
+              example:
+                session_id: "agentic-session-1699564832"
+                name: "agentic-session-1699564832"
+                namespace: "my-project"
+                status: "Pending"
+                runnerType: "langgraph"
+                websocketUrl: "ws://backend:8080/api/projects/my-project/sessions/agentic-session-1699564832/ws"
+        '400':
+          description: Bad request - Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid-runner-type:
+                  summary: Invalid runner type
+                  value:
+                    error: "Unsupported runner type 'auto-gpt'. Supported types: claude-code, langgraph"
+                    code: 400
+                missing-prompt:
+                  summary: Missing required field
+                  value:
+                    error: "Field validation for 'Prompt' failed on the 'required' tag"
+                    code: 400
+        '401':
+          description: Unauthorized - Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden - Insufficient permissions for project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    CreateAgenticSessionRequest:
+      type: object
+      required:
+        - prompt
+      properties:
+        runnerType:
+          type: string
+          enum: ["claude-code", "langgraph"]
+          default: "claude-code"
+          description: |
+            Runner implementation to use for session execution.
+            - `claude-code`: Interactive development tool (default)
+            - `langgraph`: Structured workflow orchestration
+          example: "langgraph"
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: User's initial prompt or task description
+          example: "Create an RFE for adding user authentication with OAuth2"
+        displayName:
+          type: string
+          maxLength: 255
+          description: Human-readable session name (optional)
+          example: "User Auth Feature - RFE"
+        llmSettings:
+          $ref: '#/components/schemas/LLMSettings'
+        timeout:
+          type: integer
+          minimum: 60
+          maximum: 3600
+          description: Session timeout in seconds
+          example: 600
+        interactive:
+          type: boolean
+          default: false
+          description: Enable interactive mode (requires user input during execution)
+          example: true
+        workspacePath:
+          type: string
+          description: Custom workspace path (advanced usage)
+          example: "/workspace/custom"
+        parent_session_id:
+          type: string
+          description: Parent session ID for continuation (NOT cross-runner compatible)
+          example: "agentic-session-1699564800"
+        repos:
+          type: array
+          description: Multi-repository configuration (unified mapping)
+          items:
+            $ref: '#/components/schemas/SessionRepoMapping'
+          minItems: 1
+          maxItems: 10
+        mainRepoIndex:
+          type: integer
+          minimum: 0
+          description: Index of repository to use as main working directory
+          example: 0
+        autoPushOnComplete:
+          type: boolean
+          default: false
+          description: Automatically push artifacts to output repository on completion
+          example: true
+        userContext:
+          $ref: '#/components/schemas/UserContext'
+        botAccount:
+          $ref: '#/components/schemas/BotAccountRef'
+        resourceOverrides:
+          $ref: '#/components/schemas/ResourceOverrides'
+        environmentVariables:
+          type: object
+          additionalProperties:
+            type: string
+          description: Custom environment variables for runner
+          example:
+            RFE_WORKFLOW_PHASE: "ideate"
+            CUSTOM_SETTING: "value"
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+          description: Kubernetes labels for session CR
+          example:
+            rfe-workflow: "workflow-001"
+            team: "platform"
+        annotations:
+          type: object
+          additionalProperties:
+            type: string
+          description: Kubernetes annotations for session CR
+          example:
+            description: "User authentication feature"
+
+    SessionRepoMapping:
+      type: object
+      required:
+        - input
+      properties:
+        input:
+          $ref: '#/components/schemas/GitRepoRef'
+        output:
+          $ref: '#/components/schemas/GitRepoRef'
+
+    GitRepoRef:
+      type: object
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Git repository URL (HTTPS or SSH)
+          example: "https://github.com/example/repo.git"
+        branch:
+          type: string
+          description: Branch name (defaults to main/master if not specified)
+          example: "001-feature-branch"
+
+    LLMSettings:
+      type: object
+      required:
+        - model
+      properties:
+        model:
+          type: string
+          description: LLM model identifier
+          example: "claude-3-7-sonnet-latest"
+          enum:
+            - "claude-3-7-sonnet-latest"
+            - "claude-3-5-sonnet-latest"
+            - "claude-3-opus-latest"
+        temperature:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 2.0
+          default: 0.7
+          description: LLM temperature (higher = more creative)
+          example: 0.7
+        maxTokens:
+          type: integer
+          minimum: 100
+          maximum: 8000
+          default: 4000
+          description: Maximum tokens for LLM response
+          example: 4000
+
+    UserContext:
+      type: object
+      required:
+        - userId
+        - displayName
+        - groups
+      properties:
+        userId:
+          type: string
+          description: User identifier
+          example: "user@example.com"
+        displayName:
+          type: string
+          description: User display name
+          example: "John Doe"
+        groups:
+          type: array
+          items:
+            type: string
+          description: User group memberships
+          example: ["developers", "platform-team"]
+
+    BotAccountRef:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: Bot account name (references Kubernetes secret)
+          example: "github-bot"
+
+    ResourceOverrides:
+      type: object
+      properties:
+        cpu:
+          type: string
+          description: CPU resource request/limit
+          example: "2000m"
+        memory:
+          type: string
+          description: Memory resource request/limit
+          example: "4Gi"
+        storageClass:
+          type: string
+          description: Storage class for PVC
+          example: "fast-ssd"
+        priorityClass:
+          type: string
+          description: Priority class for pod scheduling
+          example: "high-priority"
+
+    CreateSessionResponse:
+      type: object
+      required:
+        - session_id
+        - name
+        - namespace
+        - status
+        - runnerType
+      properties:
+        session_id:
+          type: string
+          description: Unique session identifier
+          example: "agentic-session-1699564832"
+        name:
+          type: string
+          description: Kubernetes CR name
+          example: "agentic-session-1699564832"
+        namespace:
+          type: string
+          description: Kubernetes namespace
+          example: "my-project"
+        status:
+          type: string
+          enum: ["Pending", "Creating", "Running", "Completed", "Failed"]
+          description: Current session status
+          example: "Pending"
+        runnerType:
+          type: string
+          enum: ["claude-code", "langgraph"]
+          description: Runner type used for this session
+          example: "langgraph"
+        websocketUrl:
+          type: string
+          format: uri
+          description: WebSocket URL for real-time updates
+          example: "ws://backend:8080/api/projects/my-project/sessions/agentic-session-1699564832/ws"
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - code
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+          example: "Unsupported runner type 'auto-gpt'. Supported types: claude-code, langgraph"
+        code:
+          type: integer
+          description: HTTP status code
+          example: 400
+        details:
+          type: object
+          description: Additional error context (optional)
+          additionalProperties: true
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token authentication
+
+security:
+  - BearerAuth: []
